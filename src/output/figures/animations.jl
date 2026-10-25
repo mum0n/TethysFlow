@@ -8,7 +8,7 @@ Field and dashboard animations.
 
 using CairoMakie
 import CairoMakie: record
-using GeoData
+using Tethys
 
 """
     animate_hydrodynamic_field(
@@ -658,7 +658,7 @@ The `hydrodynamics.zarr` directory a run's output path names, or `nothing` if it
 store. Both spellings are accepted — the output directory, or the store itself — because the
 config writes one and the notes and notebooks quote the other.
 
-A store is recognised by opening it, not by the presence of a sidecar: it is a GeoData store,
+A store is recognised by opening it, not by the presence of a sidecar: it is a Tethys store,
 so `geoload` either returns a dataset with variables or it does not, and a directory that opens
 as nothing is not a store. The old test — `time.json` and `.zattrs` present — went with the
 sidecar those replaced.
@@ -673,7 +673,7 @@ function _run_store_dir(path::AbstractString)
     for candidate in (path, joinpath(path, "hydrodynamics.zarr"))
         isdir(candidate) || continue
         ds = try
-            GeoData.geoload(candidate; backend = :zarr)
+            Tethys.geoload(candidate; backend = :zarr)
         catch
             nothing
         end
@@ -690,9 +690,9 @@ end
 The frame source `animate_hydrodynamic_field` should be handed for this run and variable.
 
 A run store is read here, into the NamedTuple the figure layer already accepts; anything else
-is returned unchanged. The store is a GeoData store, so this is `geoload` plus the dataset's own
+is returned unchanged. The store is a Tethys store, so this is `geoload` plus the dataset's own
 variables and dimension records — the same read the larval half uses, and not a walk over Zarr.
-That matters beyond tidiness: while the writer put each interval in its own directory, GeoData's
+That matters beyond tidiness: while the writer put each interval in its own directory, Tethys's
 Zarr reader could not open the store at all, so this function had to build the arrays itself, and
 so did `store_reader`, and so did the WOA reader. One format, one reader.
 
@@ -703,7 +703,7 @@ function _animation_source(hydrodynamics, variable::Symbol, frames::Int)
     store = hydrodynamics isa AbstractString ? _run_store_dir(hydrodynamics) : nothing
     isnothing(store) && return hydrodynamics
 
-    ds = GeoData.geoload(store; backend = :zarr)
+    ds = Tethys.geoload(store; backend = :zarr)
     lons = collect(Float64, ds.dims[:lon].coords)
     lats = collect(Float64, ds.dims[:lat].coords)
     depths = collect(Float64, ds.dims[:depth].coords)

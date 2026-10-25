@@ -1,5 +1,5 @@
 # ==============================================================================
-#  GeoOceanModelRun.jl -- CLI for the ocean half
+#  TethysFlowRun.jl -- CLI for the ocean half
 # ==============================================================================
 #
 #  This file holds CLI interaction only: environment bootstrap, flag parsing, and dispatch.
@@ -9,14 +9,14 @@
 #  dependency order `run_production_pipeline` uses.
 #
 #  What is deliberately NOT here: the larval segments (--track, --metrics, --viz,
-#  --figures). They belong to `GeoLarvalTracking/GeoLarvalTrackingRun.jl`, which tracks
+#  --figures). They belong to `TethysDrift/TethysDriftRun.jl`, which tracks
 #  through the flow solution this script produces. A driver holding both would be the
 #  coupling SPLIT_PLAN.md section 1 exists to remove.
 #
 #  Usage:
-#      julia --project=. GeoOceanModelRun.jl --help
-#      julia --project=. GeoOceanModelRun.jl --all
-#      julia --project=. GeoOceanModelRun.jl --grid
+#      julia --project=. TethysFlowRun.jl --help
+#      julia --project=. TethysFlowRun.jl --all
+#      julia --project=. TethysFlowRun.jl --grid
 #
 #  Every name this script imports was checked with `isdefined` against the loaded package,
 #  not assumed: it dispatches to functions `src/driver.jl` actually defines.
@@ -47,12 +47,12 @@
 const _THIS_SCRIPT = @__FILE__
 
 if !isempty(PROGRAM_FILE) && abspath(PROGRAM_FILE) == _THIS_SCRIPT &&
-   Base.find_package("GeoOceanModel") === nothing
+   Base.find_package("TethysFlow") === nothing
     import Pkg
     let curr = @__DIR__
         while true
             proj = joinpath(curr, "Project.toml")
-            if isfile(proj) && occursin("name = \"GeoOceanModel\"", read(proj, String))
+            if isfile(proj) && occursin("name = \"TethysFlow\"", read(proj, String))
                 Pkg.activate(curr)
                 break
             end
@@ -63,13 +63,15 @@ if !isempty(PROGRAM_FILE) && abspath(PROGRAM_FILE) == _THIS_SCRIPT &&
     end
 end
 
-using GeoOceanModel
-using GeoOceanModel: configuration_to_options,
+using TethysFlow
+const TethysFlow = TethysFlow
+using TethysFlow: configuration_to_options,
     options_to_configuration, save_configuration, resolve_config_name, load_configuration,
     run_segment_data, run_segment_grid, run_segment_model,
     run_segment_simulation, run_segment_viz, HydrodynamicOptions,
     output_zarr_path
-using GeoData
+using Tethys
+const Tethys = Tethys
 using TOML
 
 """
@@ -79,10 +81,10 @@ The segments this package owns and the flags that select them.
 """
 function display_help(io::IO = stdout)
     println(io, """
-    GeoOceanModelRun.jl -- regional ocean modelling, from configuration to the handover.
+    TethysFlowRun.jl -- regional ocean modelling, from configuration to the handover.
 
     Usage:
-      julia --project=. GeoOceanModelRun.jl [flags]
+      julia --project=. TethysFlowRun.jl [flags]
 
     Segments, run in this order (each one runs the ones before it):
       --data      Fetch the coastline, the bathymetry and the surface winds the config names.
@@ -236,7 +238,7 @@ things because of it:
     winds, the vertical grid. `--blank_state` clears these as well, so the next run
     fetches them again.
 
-The shared GeoData store under the lakehouse is never touched: it holds datasets several
+The shared Tethys store under the lakehouse is never touched: it holds datasets several
 runs depend on, and this run's own directory is the only thing a purge may reach into.
 
 `confirmed` is the answer to the question the purge asks. It is true here because the
@@ -255,7 +257,7 @@ function clear_run_state(opts::HydrodynamicOptions; blank_state::Bool = false,
     result_globs = [joinpath(out_dir, "checkpoints", "*.jld2"),
                     joinpath(out_dir, "*.attempt")]
     inputs = [opts.input_dir]
-    return GeoData.purge_run_state(out_dir; results, result_globs, inputs,
+    return Tethys.purge_run_state(out_dir; results, result_globs, inputs,
                                    blank_state = blank_state, input = input,
                                    confirmed = confirmed)
 end
@@ -324,7 +326,7 @@ function main(args::Vector{String})
     cfg_file = resolve_config_file(flags["config"])
 
     println("="^73)
-    println(" GeoOceanModel -- regional ocean model")
+    println(" TethysFlow -- regional ocean model")
     println("="^73)
     println(" Config:    $(cfg_file)")
     println(" Grid:      $(opts.grid_size[1]) x $(opts.grid_size[2]) x $(opts.grid_size[3]) cells")

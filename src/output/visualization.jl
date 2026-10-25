@@ -6,8 +6,8 @@ the families in `figures/`. Each family has its own file, so a figure cannot dep
 how a field was resolved and adding a family does not grow the whole.
 
 `figures/hydrodynamic_access.jl` is included first because every other ocean family reads
-through it. The larval figure family is not here: it belongs to `GeoLarvalTracking`, and this
-package imports nothing from it (SPLIT_PLAN.md 1).
+through it. The larval figure family is not here: it belongs to `TethysDrift`, and this
+package imports nothing from it.
 """
 
 using CairoMakie

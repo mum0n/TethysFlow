@@ -3,8 +3,9 @@
 # ==============================================================================
 
 using Test
-using GeoOceanModel
-using GeoData
+using TethysFlow
+const TethysFlow = TethysFlow
+using Tethys
 using Zarr
 
 @testset "Multi-Domain Mosaic Stitching" begin
@@ -27,14 +28,14 @@ using Zarr
     ax_w = (x = lon_w, y = lat_w, z = z_w)
     ax_e = (x = lon_e, y = lat_e, z = z_e)
 
-    # Build stores using GeoOceanModel internal store dataset builder
-    ds_w = GeoOceanModel._build_store_dataset(tile_w_path, ax_w, ["u", "T"], length(t_vals), nothing)
+    # Build stores using TethysFlow internal store dataset builder
+    ds_w = TethysFlow._build_store_dataset(tile_w_path, ax_w, ["u", "T"], length(t_vals), nothing)
     gw = Zarr.zopen(tile_w_path, "w")
     for (m, t) in enumerate(t_vals)
         gw.arrays["time"][m] = t
     end
 
-    ds_e = GeoOceanModel._build_store_dataset(tile_e_path, ax_e, ["u", "T"], length(t_vals), nothing)
+    ds_e = TethysFlow._build_store_dataset(tile_e_path, ax_e, ["u", "T"], length(t_vals), nothing)
     ge = Zarr.zopen(tile_e_path, "w")
     for (m, t) in enumerate(t_vals)
         ge.arrays["time"][m] = t
@@ -59,7 +60,7 @@ using Zarr
     @test res_path == mosaic_path
 
     # Verify blended mosaic store
-    ds_m = GeoData.geoload(mosaic_path; backend = :zarr)
+    ds_m = Tethys.load_dataset(mosaic_path; backend = :zarr)
     @test haskey(ds_m.variables, "T")
     @test haskey(ds_m.variables, "u")
 

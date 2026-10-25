@@ -53,6 +53,23 @@ function configuration_to_options(config_dict::AbstractDict;
     z_min   = Float64(get_val("domain", "z_min", -3500.0))
     z_max   = Float64(get_val("domain", "z_max", 0.0))
 
+    # Projection / CRS specification:
+    # Operators can supply `crs = "EPSG:32620"`, `epsg = 32620`, a WKT string, or a named projection.
+    raw_crs = get_val("domain", "crs", get_val("domain", "epsg", get_val("domain", "wkt", nothing)))
+    proj_val = if raw_crs !== nothing
+        string(raw_crs)
+    else
+        String(get_val("domain", "projection", get_val("grid", "projection", "geographic")))
+    end
+    proj_zone_val = Int(get_val("domain", "projection_zone", get_val("domain", "utm_zone", get_val("grid", "utm_zone", 0))))
+    proj_lat1_val = Float64(get_val("domain", "projection_lat1", get_val("domain", "lambert_lat1", get_val("grid", "lambert_lat1", 0.0))))
+    proj_lat2_val = Float64(get_val("domain", "projection_lat2", get_val("domain", "lambert_lat2", get_val("grid", "lambert_lat2", 0.0))))
+    rotation_val = Float64(get_val("domain", "rotation", get_val("domain", "rotation_deg", 0.0)))
+    lon_center_val = Float64(get_val("domain", "lon_center", (lon_min + lon_max) / 2.0))
+    lat_center_val = Float64(get_val("domain", "lat_center", (lat_min + lat_max) / 2.0))
+    extent_x_val = Float64(get_val("domain", "extent_along_shelf_km", get_val("domain", "extent_x_km", 0.0)))
+    extent_y_val = Float64(get_val("domain", "extent_cross_shelf_km", get_val("domain", "extent_y_km", 0.0)))
+
     buffer_km = Float64(get_val("domain", "buffer_km", get_val("biology", "buffer_km", 100.0)))
 
     nx = Int(get_val("grid", "nx", 50))
@@ -64,12 +81,12 @@ function configuration_to_options(config_dict::AbstractDict;
     wind_source = String(get_val("data", "wind_source", "open_meteo"))
     wind_time_iso = String(get_val("data", "wind_time_iso", "2020-06-01T00:00:00Z"))
 
-    # Shelf geometry, from [bathymetry]. `inshore_depth` is the water depth at the landward
+    # Shelf geometry, from [bathymetry] or [grid]. `inshore_depth` is the water depth at the landward
     # edge of the domain (positive, m); `shelf_slope` is the total rise across the shelf (m).
     # Both are read from here rather than hardcoded, so a config can actually shape its seabed.
-    inshore_depth = abs(Float64(get_val("bathymetry", "inshore_depth", 20.0)))
-    shelf_slope   = abs(Float64(get_val("bathymetry", "shelf_slope", 180.0)))
-    mask_bay_of_fundy = Bool(get_val("bathymetry", "mask_bay_of_fundy", false))
+    inshore_depth = abs(Float64(get_val("bathymetry", "inshore_depth", get_val("grid", "inshore_depth", 20.0))))
+    shelf_slope   = abs(Float64(get_val("bathymetry", "shelf_slope", get_val("grid", "shelf_slope", 180.0))))
+    mask_bay_of_fundy = Bool(get_val("bathymetry", "mask_bay_of_fundy", get_val("grid", "mask_bay_of_fundy", false)))
 
     # Tidal body forcing. `constituents` is an empty list in a config that disables tides, so
     # an empty read is not an error; it simply means no constituents were requested.
@@ -187,31 +204,31 @@ function configuration_to_options(config_dict::AbstractDict;
      # resolver, so the environment override, the local preference and the user
      # configuration apply here as they do everywhere else.
      _config_stem = isempty(strip(config_name)) ? "default" : strip(String(config_name))
-     _lakehouse_output = GeoData.lakehouse_dir("GeoOceanModel", _config_stem)
+     _lakehouse_output = Tethys.lakehouse_dir("TethysFlow", _config_stem)
      output_path = isempty(_storage_output) ? _lakehouse_output : _storage_output
      
      enable_checkpoint = Bool(get_val("storage", "enable_checkpoint", true))
-     checkpoint_prefix = String(get_val("storage", "checkpoint_prefix", "checkpoint_ParticleTracking"))
+     checkpoint_prefix = String(get_val("storage", "checkpoint_prefix", "checkpoint_TethysFlow"))
      checkpoint_schedule_seconds = Float64(get_val("storage", "checkpoint_schedule_seconds", 21600.0))
      checkpoint_dir = String(get_val("storage", "checkpoint_dir", "outputs/checkpoints"))
      checkpoint_cleanup = Bool(get_val("storage", "checkpoint_cleanup", true))
      
      # `storage.output_path` is this run's output DIRECTORY -- under the lakehouse -- and
-     # everything a run writes lives beneath it: the GeoData store, this run's `inputs/`
+     # everything a run writes lives beneath it: the Tethys store, this run's `inputs/`
      # ingested-data cache, its provenance and its resolved config. It is deliberately NOT
      # shared between runs: one shared `inputs/` let a run with a changed domain silently
      # reuse another domain's bathymetry, the quiet mismatch `resolved_config.toml` and
      # `data_provenance.json` exist to expose. The cost is disk -- a dataset is fetched once
      # per configuration rather than once per machine -- and that is the intended trade, because it
      # makes each configuration a self-contained, shareable directory under
-     # `lakehouse/GeoOceanModel/<name>/`.
+     # `lakehouse/TethysFlow/<name>/`.
      #
      # The path is resolved against THIS PACKAGE'S ROOT, not the current working directory:
      # a run started from anywhere then lands in the same place. The resolver also accepts
      # the lakehouse either inside the project (`lakehouse/...`) or beside it
      # (`../lakehouse/...`), so a config written for one layout still resolves in the other.
      output_dir = isempty(_storage_output) ? _lakehouse_output :
-                  GeoData.project_lakehouse_path(output_path, _PROJECT_ROOT)
+                  Tethys.project_lakehouse_path(output_path, _PROJECT_ROOT)
      input_dir  = joinpath(output_dir, "inputs")
      seed       = Int(get_val("runtype", "seed", get_val("paths", "seed", 42)))
 
@@ -300,7 +317,29 @@ function configuration_to_options(config_dict::AbstractDict;
         isfile(dst) || cp(src, dst, force = true)
         v_file = dst
     end
-    atmo_src = Symbol(lowercase(String(get_val("atmosphere", "forcing", "era5_climatology"))))
+    # Atmospheric forcing source provider. Check `[atmosphere] source`, with fallback to
+    # `[atmosphere] forcing` and `[data] wind_source`. Map aliases so "open_meteo" maps to :era5.
+    atmo_src_str = if haskey(config_dict, "atmosphere") && haskey(config_dict["atmosphere"], "source")
+        String(config_dict["atmosphere"]["source"])
+    elseif haskey(config_dict, "atmosphere") && haskey(config_dict["atmosphere"], "forcing")
+        String(config_dict["atmosphere"]["forcing"])
+    elseif haskey(config_dict, "data") && haskey(config_dict["data"], "wind_source")
+        String(config_dict["data"]["wind_source"])
+    else
+        "era5_climatology"
+    end
+    atmo_src_clean = replace(lowercase(strip(atmo_src_str)), "-" => "_")
+    atmo_src = if atmo_src_clean in ("open_meteo", "openmeteo", "era5", "open", "cds", "copernicus")
+        :era5
+    elseif atmo_src_clean in ("era5_climatology", "climatology")
+        :era5_climatology
+    elseif atmo_src_clean in ("mhw",)
+        :mhw
+    elseif atmo_src_clean in ("synthetic", "none", "off", "false")
+        :synthetic
+    else
+        Symbol(atmo_src_clean)
+    end
     obc_src_val = get_val("boundaries", "ocean_boundary_source", nothing)
     if isnothing(obc_src_val)
         obc_src_val = get_val("boundaries", "parent_ocean", "glorys12v1")
@@ -490,6 +529,15 @@ function configuration_to_options(config_dict::AbstractDict;
         cv_settlement = cv_settlement,
         mask_bay_of_fundy = mask_bay_of_fundy,
         active_boundaries = act_b_tuple,
+        projection = proj_val,
+        projection_zone = proj_zone_val,
+        projection_lat1 = proj_lat1_val,
+        projection_lat2 = proj_lat2_val,
+        rotation_deg = rotation_val,
+        lon_center = lon_center_val,
+        lat_center = lat_center_val,
+        extent_x_km = extent_x_val,
+        extent_y_km = extent_y_val,
         overrides...
     )
 end
@@ -508,7 +556,16 @@ function options_to_configuration(opts::HydrodynamicOptions)::Dict{String, Any}
             "lat_max" => opts.domain_lat[2],
             "z_min" => opts.domain_z[1],
             "z_max" => opts.domain_z[2],
-            "buffer_km" => opts.buffer_km
+            "buffer_km" => opts.buffer_km,
+            "projection" => opts.projection,
+            "projection_zone" => opts.projection_zone,
+            "projection_lat1" => opts.projection_lat1,
+            "projection_lat2" => opts.projection_lat2,
+            "rotation" => opts.rotation_deg,
+            "lon_center" => opts.lon_center,
+            "lat_center" => opts.lat_center,
+            "extent_along_shelf_km" => opts.extent_x_km,
+            "extent_cross_shelf_km" => opts.extent_y_km
         ),
         "grid" => Dict{String, Any}(
             "nx" => opts.grid_size[1],
@@ -719,7 +776,16 @@ function to_hydrodynamic_config(opts::HydrodynamicOptions; kwargs...)::Hydrodyna
          :checkpoint_cleanup       => opts.checkpoint_cleanup,
          :auto_restart             => opts.auto_restart,
          :use_gpu                  => opts.use_gpu,
-         :fallback_to_cpu          => opts.fallback_to_cpu
+         :fallback_to_cpu          => opts.fallback_to_cpu,
+         :projection               => opts.projection,
+         :projection_zone          => opts.projection_zone,
+         :projection_lat1          => opts.projection_lat1,
+         :projection_lat2          => opts.projection_lat2,
+         :rotation_deg             => opts.rotation_deg,
+         :lon_center               => opts.lon_center,
+         :lat_center               => opts.lat_center,
+         :extent_x_km              => opts.extent_x_km,
+         :extent_y_km              => opts.extent_y_km
     )
     for (k, v) in kwargs
         d[k] = v
@@ -752,13 +818,22 @@ function to_hydrodynamic_config(opts::HydrodynamicOptions; kwargs...)::Hydrodyna
         Bool(d[:adaptive_cfl]), Float64(d[:target_cfl]),
         Float64(d[:target_wave_cfl]), Float64(d[:max_dt_seconds]),
         Float64(d[:min_dt_seconds]), Float64(d[:coriolis_latitude]),
-         Float64(d[:divergence_limit]), String(d[:output_path]),
-         Float64(d[:output_schedule_seconds]),
-          Float64(d[:progress_schedule_seconds]),
-         Bool(d[:enable_checkpoint]), String(d[:checkpoint_prefix]),
-         String(d[:checkpoint_schedule]), String(d[:checkpoint_dir]),
-         Bool(d[:checkpoint_cleanup]), Bool(d[:auto_restart]),
-         Bool(d[:use_gpu]), Bool(d[:fallback_to_cpu])
+        Float64(d[:divergence_limit]), String(d[:output_path]),
+        Float64(d[:output_schedule_seconds]),
+        Float64(d[:progress_schedule_seconds]),
+        Bool(d[:enable_checkpoint]), String(d[:checkpoint_prefix]),
+        String(d[:checkpoint_schedule]), String(d[:checkpoint_dir]),
+        Bool(d[:checkpoint_cleanup]), Bool(d[:auto_restart]),
+        Bool(d[:use_gpu]), Bool(d[:fallback_to_cpu]),
+        String(d[:projection]),
+        Int(d[:projection_zone]),
+        Float64(d[:projection_lat1]),
+        Float64(d[:projection_lat2]),
+        Float64(d[:rotation_deg]),
+        Float64(d[:lon_center]),
+        Float64(d[:lat_center]),
+        Float64(d[:extent_x_km]),
+        Float64(d[:extent_y_km])
     )
 end
 

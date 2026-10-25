@@ -3,9 +3,9 @@
 
 Grid construction and immersed boundary setup for shelf hydrodynamic modeling.
 
-ParticleTracking-specific functions requiring Oceananigans grid types.
+TethysFlow-specific functions requiring Oceananigans grid types.
 All generic geospatial operations (bathymetry I/O, regridding, coastline, marine cell
-extraction, smoothing, buffering) are in GeoData.core.bathy. 
+extraction, smoothing, buffering) are in Tethys.core.bathy. 
 """
 
 using Oceananigans
@@ -13,8 +13,7 @@ using Oceananigans.Grids: Face, Center, znode
 
 using Oceananigans.Architectures: architecture, on_architecture, CPU, GPU
 using Oceananigans.ImmersedBoundaries: ImmersedBoundaryGrid, GridFittedBottom
-using GeoData
-using GeoDataSources
+using Tethys
 using Random
 
 """
@@ -57,7 +56,18 @@ function build_shelf_grid(;
     grid_size::Tuple{Int, Int, Int} = (50, 50, 10),
     halo::Tuple{Int, Int, Int} = (7, 7, 5),
     topology::Tuple = (Bounded, Bounded, Bounded),
-    fallback_to_cpu::Bool = false
+    fallback_to_cpu::Bool = false,
+    projection = "geographic",
+    projection_zone::Integer = 0,
+    projection_lat1::Real = 0.0,
+    projection_lat2::Real = 0.0,
+    rotation_deg::Real = 0.0,
+    lon_center::Union{Nothing, Real} = nothing,
+    lat_center::Union{Nothing, Real} = nothing,
+    extent_x_km::Union{Nothing, Real} = nothing,
+    extent_y_km::Union{Nothing, Real} = nothing,
+    extent_x::Union{Nothing, Real} = nothing,
+    extent_y::Union{Nothing, Real} = nothing
 )
     if lon_range[1] >= lon_range[2]
         error("Invalid longitude range: $(lon_range). lon_min must be < lon_max.")
@@ -88,11 +98,76 @@ function build_shelf_grid(;
 
     arch = resolve_architecture(architecture; fallback_to_cpu = fallback_to_cpu)
 
-    grid = LatitudeLongitudeGrid(
+    eff_lx = if extent_x !== nothing && extent_x > 0.0
+        Float64(extent_x)
+    elseif extent_x_km !== nothing && extent_x_km > 0.0
+        Float64(extent_x_km) * 1000.0
+    else
+        nothing
+    end
+
+    eff_ly = if extent_y !== nothing && extent_y > 0.0
+        Float64(extent_y)
+    elseif extent_y_km !== nothing && extent_y_km > 0.0
+        Float64(extent_y_km) * 1000.0
+    else
+        nothing
+    end
+
+    proj_obj = if projection isa AbstractProjection
+        projection
+    else
+        create_projection(
+            projection = string(projection),
+            zone = Int(projection_zone),
+            lat_1 = projection_lat1 == 0.0 ? nothing : Float64(projection_lat1),
+            lat_2 = projection_lat2 == 0.0 ? nothing : Float64(projection_lat2),
+            lon_center = lon_center === nothing ? (lon_range[1] + lon_range[2]) / 2.0 : Float64(lon_center),
+            lat_center = lat_center === nothing ? (lat_range[1] + lat_range[2]) / 2.0 : Float64(lat_center),
+            rotation_deg = Float64(rotation_deg),
+            extent_x = eff_lx === nothing ? 0.0 : eff_lx,
+            extent_y = eff_ly === nothing ? 0.0 : eff_ly
+        )
+    end
+
+    if !is_planar(proj_obj) && rotation_deg == 0.0
+        return LatitudeLongitudeGrid(
+            arch;
+            size = grid_size,
+            longitude = lon_range,
+            latitude = lat_range,
+            z = z_specification,
+            topology = topology,
+            halo = halo
+        )
+    end
+
+    # Planar projected or rotated computational frame
+    lx = if eff_lx !== nothing && eff_lx > 0.0
+        eff_lx
+    else
+        c1 = forward_project(proj_obj, lon_range[1], lat_range[1])
+        c2 = forward_project(proj_obj, lon_range[2], lat_range[1])
+        c3 = forward_project(proj_obj, lon_range[2], lat_range[2])
+        c4 = forward_project(proj_obj, lon_range[1], lat_range[2])
+        maximum((c1[1], c2[1], c3[1], c4[1])) - minimum((c1[1], c2[1], c3[1], c4[1]))
+    end
+
+    ly = if eff_ly !== nothing && eff_ly > 0.0
+        eff_ly
+    else
+        c1 = forward_project(proj_obj, lon_range[1], lat_range[1])
+        c2 = forward_project(proj_obj, lon_range[2], lat_range[1])
+        c3 = forward_project(proj_obj, lon_range[2], lat_range[2])
+        c4 = forward_project(proj_obj, lon_range[1], lat_range[2])
+        maximum((c1[2], c2[2], c3[2], c4[2])) - minimum((c1[2], c2[2], c3[2], c4[2]))
+    end
+
+    grid = RectilinearGrid(
         arch;
         size = grid_size,
-        longitude = lon_range,
-        latitude = lat_range,
+        x = (-lx / 2.0, lx / 2.0),
+        y = (-ly / 2.0, ly / 2.0),
         z = z_specification,
         topology = topology,
         halo = halo
@@ -101,16 +176,30 @@ function build_shelf_grid(;
 end
 
 """
-    grid_geographic_bounds(grid) -> (Tuple{Float64, Float64}, Tuple{Float64, Float64})
+    grid_geographic_bounds(grid; projection = nothing) -> (Tuple{Float64, Float64}, Tuple{Float64, Float64})
 
 Compute the geographic bounding box `((lon_min, lon_max), (lat_min, lat_max))` in
 degrees East and North enclosing `grid`'s interior domain.
 """
-function grid_geographic_bounds(grid)
+function grid_geographic_bounds(grid; projection = nothing)
     base_g = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
-    lon_range = (Float64(base_g.λᶠᵃᵃ[1]), Float64(base_g.λᶠᵃᵃ[base_g.Nx + 1]))
-    lat_range = (Float64(base_g.φᵃᶠᵃ[1]), Float64(base_g.φᵃᶠᵃ[base_g.Ny + 1]))
-    return lon_range, lat_range
+    if base_g isa LatitudeLongitudeGrid
+        lon_range = (Float64(base_g.λᶠᵃᵃ[1]), Float64(base_g.λᶠᵃᵃ[base_g.Nx + 1]))
+        lat_range = (Float64(base_g.φᵃᶠᵃ[1]), Float64(base_g.φᵃᶠᵃ[base_g.Ny + 1]))
+        return lon_range, lat_range
+    end
+    if projection !== nothing
+        x_min, x_max = Float64(base_g.xᶠᵃᵃ[1]), Float64(base_g.xᶠᵃᵃ[base_g.Nx + 1])
+        y_min, y_max = Float64(base_g.yᵃᶠᵃ[1]), Float64(base_g.yᵃᶠᵃ[base_g.Ny + 1])
+        c1 = inverse_project(projection, x_min, y_min)
+        c2 = inverse_project(projection, x_max, y_min)
+        c3 = inverse_project(projection, x_max, y_max)
+        c4 = inverse_project(projection, x_min, y_max)
+        lons = (c1[1], c2[1], c3[1], c4[1])
+        lats = (c1[2], c2[2], c3[2], c4[2])
+        return (minimum(lons) - 0.2, maximum(lons) + 0.2), (minimum(lats) - 0.2, maximum(lats) + 0.2)
+    end
+    error("RectilinearGrid requires projection to determine geographic bounds.")
 end
 
 """
@@ -181,9 +270,9 @@ function build_immersed_grid(
 )
     topo_matrix::Matrix{Float64} = if bathymetry isa GeoDataset
         elev_var = haskey(bathymetry.variables, varname) ? varname :
-                   first(GeoData.variables_like(bathymetry, ["elevation", "altitude", "z", "topo"]))
+                   first(Tethys.variables_like(bathymetry, ["elevation", "altitude", "z", "topo"]))
         elev_ga = bathymetry.variables[elev_var]
-        perm = GeoData.dim_permutation(elev_ga.dims, :lon, :lat)
+        perm = Tethys.dim_permutation(elev_ga.dims, :lon, :lat)
         raw = Array{Float64}(elev_ga.data)
         ndims(raw) == 1 ? reshape(raw, :, 1) : permutedims(raw, perm)
     else
@@ -241,22 +330,32 @@ within the hypertidal Bay of Fundy, Minas Basin, or Chignecto Bay exclusion zone
 end
 
 """
-    _grid_interior_centres(grid) -> (Vector{Float64}, Vector{Float64})
+    _grid_interior_centres(grid; projection = nothing) -> (Vector/Matrix{Float64}, Vector/Matrix{Float64})
 
-Longitude and latitude of `grid`'s interior cell centres: `λᶜᵃᵃ[1 : Nx]` and `φᵃᶜᵃ[1 : Ny]`.
-
-These are the coordinates `GridFittedBottom` and every spatial output field are indexed by,
-so anything that wants "where on Earth is cell (i, j)" must use these. There was one
-implementation per caller, and they disagreed: one sliced `[Hx+1 : Hx+Nx]`, which is mostly
-halo, and one rebuilt them from the face bounds with a `range` of length `Nx`, which is the
-face extent rather than the centres and so lands half a cell off. Both read as plausible and
-both were wrong, which is why this is now one function.
+Longitude and latitude of `grid`'s interior cell centres.
+For a `LatitudeLongitudeGrid`, returns 1D vectors `(lons, lats)`.
+For a `RectilinearGrid` with `projection !== nothing`, returns 2D matrices `(lon_mat, lat_mat)`.
 """
-function _grid_interior_centres(grid)
+function _grid_interior_centres(grid; projection = nothing)
     base_g = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
     cpu_g = architecture(base_g) isa GPU ? on_architecture(CPU(), base_g) : base_g
-    return ([Float64(cpu_g.λᶜᵃᵃ[i]) for i in 1:cpu_g.Nx],
-            [Float64(cpu_g.φᵃᶜᵃ[j]) for j in 1:cpu_g.Ny])
+    if cpu_g isa LatitudeLongitudeGrid
+        return ([Float64(cpu_g.λᶜᵃᵃ[i]) for i in 1:cpu_g.Nx],
+                [Float64(cpu_g.φᵃᶜᵃ[j]) for j in 1:cpu_g.Ny])
+    end
+    if projection !== nothing
+        nx, ny = cpu_g.Nx, cpu_g.Ny
+        xs = [Float64(cpu_g.xᶜᵃᵃ[i]) for i in 1:nx]
+        ys = [Float64(cpu_g.yᵃᶜᵃ[j]) for j in 1:ny]
+        lon_mat = Matrix{Float64}(undef, nx, ny)
+        lat_mat = Matrix{Float64}(undef, nx, ny)
+        for j in 1:ny, i in 1:nx
+            lon_mat[i, j], lat_mat[i, j] = inverse_project(projection, xs[i], ys[j])
+        end
+        return (lon_mat, lat_mat)
+    end
+    return ([Float64(cpu_g.xᶜᵃᵃ[i]) for i in 1:cpu_g.Nx],
+            [Float64(cpu_g.yᵃᶜᵃ[j]) for j in 1:cpu_g.Ny])
 end
 
 """
@@ -265,46 +364,66 @@ end
         elevation::AbstractMatrix,
         lon::AbstractVector,
         lat::AbstractVector;
+        projection = nothing,
         min_water_depth::Real = 10.0,
+        max_water_depth::Real = 0.0,
         mask_bay_of_fundy::Bool = false
     ) -> Matrix{Float64}
 
 Regrid `(elevation, lon, lat)` onto `grid`'s interior cell centres and condition the result
 for use as a `GridFittedBottom`.
-
-This is the array-level half of `build_immersed_grid_from_real_data` -- bilinear regridding,
-the Bay of Fundy mask, smoothing, and the depth floor -- and it is separate from that
-function so it can be exercised without fetching anything: acquisition is the only part of
-`build_immersed_grid_from_real_data` that leaves the process.
-
-The target coordinates are the grid's interior cell centres, from `_grid_interior_centres`,
-because `GridFittedBottom` indexes its array by interior cell. The previous form was
-`range(λᶠᵃᵃ[1], λᶠᵃᵃ[Nx+1], length = Nx)`, which is a *different* set of points: it spans the
-interior face extent rather than the centres, so every value landed half a cell away from the
-cell it was stored in. A half-cell offset is invisible to any test that only checks that an
-`ImmersedBoundaryGrid` came back, which is why it survived.
-
-`min_water_depth` is applied as a floor on the *smoothed* topography, so a cell whose
-smoothing pulled it below the floor is raised to it.
 """
 function _fit_bathymetry_to_grid(
     grid,
     elevation::AbstractMatrix,
     lon::AbstractVector,
     lat::AbstractVector;
+    projection = nothing,
     min_water_depth::Real = 10.0,
     max_water_depth::Real = 0.0,
     mask_bay_of_fundy::Bool = false
 )
     nx, ny, _ = size(grid)
-    target_lons, target_lats = _grid_interior_centres(grid)
+    target_lons, target_lats = _grid_interior_centres(grid; projection = projection)
 
-    regridded_topo = regrid_2d_field(lon, lat, elevation, target_lons, target_lats)
+    regridded_topo = if target_lons isa AbstractMatrix && target_lats isa AbstractMatrix
+        out = Matrix{Float64}(undef, nx, ny)
+        lons_clean = Float64.(collect(lon))
+        lats_clean = Float64.(collect(lat))
+        elev_clean = Array{Float64}(elevation)
+        if size(elev_clean) == (length(lats_clean), length(lons_clean))
+            elev_clean = permutedims(elev_clean, (2, 1))
+        end
+        if !issorted(lons_clean)
+            p = sortperm(lons_clean)
+            lons_clean = lons_clean[p]
+            elev_clean = elev_clean[p, :]
+        end
+        if !issorted(lats_clean)
+            p = sortperm(lats_clean)
+            lats_clean = lats_clean[p]
+            elev_clean = elev_clean[:, p]
+        end
+        itp = Interpolations.interpolate(
+            (lons_clean, lats_clean),
+            elev_clean,
+            Interpolations.Gridded(Interpolations.Linear())
+        )
+        itp_flat = Interpolations.extrapolate(itp, Interpolations.Flat())
+        for j in 1:ny, i in 1:nx
+            out[i, j] = itp_flat(target_lons[i, j], target_lats[i, j])
+        end
+        out
+    else
+        regrid_2d_field(lon, lat, elevation, target_lons, target_lats)
+    end
 
     if mask_bay_of_fundy
         n_masked = 0
         for j in 1:ny, i in 1:nx
-            if is_in_bay_of_fundy(target_lons[i], target_lats[j])
+            cell_lon = target_lons isa AbstractMatrix ? target_lons[i, j] : target_lons[i]
+            cell_lat = target_lats isa AbstractMatrix ? target_lats[i, j] : target_lats[j]
+            if is_in_bay_of_fundy(cell_lon, cell_lat)
                 regridded_topo[i, j] = 0.0
                 n_masked += 1
             end
@@ -338,41 +457,25 @@ end
 
 """
     build_immersed_grid_from_real_data(
-        grid::LatitudeLongitudeGrid;
+        grid;
+        projection = nothing,
         source = nothing,
         tier = nothing,
         varname::AbstractString = "elevation",
         output_path::Union{Nothing, AbstractString} = nothing,
         force::Bool = false,
         min_water_depth::Real = 10.0,
+        max_water_depth::Real = 0.0,
         mask_bay_of_fundy::Bool = false,
         kwargs...
     ) -> ImmersedBoundaryGrid
 
 Construct an `ImmersedBoundaryGrid` by interpolating real-world bathymetry onto the target
 model grid coordinates.
-
-The bathymetry is requested from `GeoDataSources` by `source`, over the domain taken from
-`grid` itself. Nothing here names a file, a format, or a backend: which product the source
-resolves to, at which `tier`, and whether it is fetched or already cached are all decided
-inside `GeoDataSources`. `source = nothing` asks it to choose, which it does by coverage --
-the CHS 15-arc-second soundings where the domain lies inside them, the global ETOPO 2022
-model everywhere else. See `GeoDataSources.preferred_bathymetry_source`.
-
-`output_path`, when given, is where that resolution is made durable, so this grid and every
-later reader in a run see one sea floor rather than one per fetch. `force` re-fetches past a
-cache.
-
-# Example
-```julia
-# The CHS soundings, because the domain asked for is the Scotian Shelf.
-grid = build_immersed_grid_from_real_data(
-    base_grid; source = "scotian_shelf",
-    output_path = joinpath("inputs", "bathymetry_active.nc"))
-```
 """
 function build_immersed_grid_from_real_data(
     grid;
+    projection = nothing,
     source = nothing,
     tier = nothing,
     varname::AbstractString = "elevation",
@@ -384,21 +487,21 @@ function build_immersed_grid_from_real_data(
     kwargs...
 )
     base_g = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
-    lon_range, lat_range = grid_geographic_bounds(base_g)
+    lon_range, lat_range = grid_geographic_bounds(base_g; projection = projection)
 
     bathy_elevation, bathy_lon, bathy_lat = if !force && !isnothing(output_path) && (isfile(output_path) || isdir(output_path))
-        ds = GeoData.geoload(output_path)
+        ds = Tethys.geoload(output_path)
         elev_var = haskey(ds.variables, varname) ? varname :
-                   first(GeoData.variables_like(ds, ["elevation", "altitude", "z", "topo"]))
+                   first(Tethys.variables_like(ds, ["elevation", "altitude", "z", "topo"]))
         elev_ga = ds.variables[elev_var]
-        perm = GeoData.dim_permutation(elev_ga.dims, :lon, :lat)
-        lon_c, _ = GeoData.axis(ds, :lon)
-        lat_c, _ = GeoData.axis(ds, :lat)
+        perm = Tethys.dim_permutation(elev_ga.dims, :lon, :lat)
+        lon_c, _ = Tethys.axis(ds, :lon)
+        lat_c, _ = Tethys.axis(ds, :lat)
         raw = Array{Float64}(elev_ga.data)
         elev = ndims(raw) == 1 ? reshape(raw, :, 1) : permutedims(raw, perm)
         (elev, lon_c, lat_c)
     else
-        bathy = GeoDataSources.bathymetry_field(;
+        bathy = Tethys.bathymetry_field(;
             source = source,
             lon_range = lon_range,
             lat_range = lat_range,
@@ -413,6 +516,7 @@ function build_immersed_grid_from_real_data(
 
     conditioned_topo = _fit_bathymetry_to_grid(
         base_g, bathy_elevation, bathy_lon, bathy_lat;
+        projection = projection,
         min_water_depth = min_water_depth,
         max_water_depth = max_water_depth,
         mask_bay_of_fundy = mask_bay_of_fundy
@@ -422,27 +526,35 @@ function build_immersed_grid_from_real_data(
 end
 
 """
-    extract_grid_coordinates(grid) -> NamedTuple
+    extract_grid_coordinates(grid; projection = nothing) -> NamedTuple
 
-Extract 1D cell-center spatial coordinates `(lons, lats, depths)` from an
-Oceananigans computational grid, returning geographic coordinates in **degrees**
-and the vertical coordinate in **metres**.
+Extract cell-center spatial coordinates `(lons, lats, depths)` from an
+Oceananigans computational grid.
 """
-function extract_grid_coordinates(grid)
+function extract_grid_coordinates(grid; projection = nothing)
     base_g = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
     cpu_g = architecture(base_g) isa GPU ? on_architecture(CPU(), base_g) : base_g
     nx, ny, nz = cpu_g.Nx, cpu_g.Ny, cpu_g.Nz
 
-    # Geographic horizontal coordinates (degrees), halo region stripped (interior indices 1:nx,
-    # 1:ny). Through `_grid_interior_centres`, so the fit and the output fields cannot disagree
-    # about where a cell is.
-    lons, lats = _grid_interior_centres(cpu_g)
+    lons, lats = _grid_interior_centres(cpu_g; projection = projection)
 
-    # Vertical coordinate (metres) is genuinely metric, so `znode` is appropriate.
     depths = [Float64(Oceananigans.Grids.znode(k, cpu_g, Oceananigans.Grids.Center()))
               for k in 1:nz]
 
-    return (lons = lons, lats = lats, depths = depths)
+    x_coords = if cpu_g isa RectilinearGrid
+        ix = (cpu_g.Hx + 1):(cpu_g.Hx + cpu_g.Nx)
+        Float64.(_host_copy(cpu_g.xᶜᵃᵃ)[ix])
+    else
+        lons
+    end
+    y_coords = if cpu_g isa RectilinearGrid
+        iy = (cpu_g.Hy + 1):(cpu_g.Hy + cpu_g.Ny)
+        Float64.(_host_copy(cpu_g.yᵃᶜᵃ)[iy])
+    else
+        lats
+    end
+
+    return (lons = lons, lats = lats, depths = depths, x = x_coords, y = y_coords)
 end
 
 """
@@ -492,31 +604,31 @@ end
 
 Determine whether point (x, y) is inside polygon (poly_lons, poly_lats).
 
-A re-export of `GeoData.point_in_polygon`, kept because the geometry is a pure data-layer
+A re-export of `Tethys.point_in_polygon`, kept because the geometry is a pure data-layer
 concern and a caller that has rings should not have to import this package to test them.
 """
-const point_in_polygon = GeoData.point_in_polygon
+const point_in_polygon = Tethys.point_in_polygon
 
 """
     is_point_on_land(lon::Real, lat::Real; coastline = nothing) -> Bool
 
 Determine whether geographic point (lon, lat) falls on land.
 
-A re-export of `GeoData.is_point_on_land`, which resolves the coastline file when the caller
+A re-export of `Tethys.is_point_on_land`, which resolves the coastline file when the caller
 does not name one. The default location is that function's to decide, not this package's.
 
 There is no bundled regional fallback here. This package is an application layer for one
-region, and the rings for that region live in `GeoDataSources.SCOTIAN_SHELF_COASTLINE`; a
+region, and the rings for that region live in `Tethys.SCOTIAN_SHELF_COASTLINE`; a
 caller that wants a regional default passes them, which is a decision it can see.
 """
-const is_point_on_land = GeoData.is_point_on_land
+const is_point_on_land = Tethys.is_point_on_land
 
 """
     load_coastline_polygons(; coastline_path = nothing) -> Vector{NamedTuple}
 
 Load coastline rings from `coastline_path`, or from the default location when none is named.
 
-A re-export of `GeoData.load_coastline_polygons`.
+A re-export of `Tethys.load_coastline_polygons`.
 """
-const load_coastline_polygons = GeoData.load_coastline_polygons
+const load_coastline_polygons = Tethys.load_coastline_polygons
 

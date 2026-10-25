@@ -136,7 +136,7 @@ function compute_hydrodynamic_diagnostics(
     rho = zeros(Float64, nx, ny, nz)
     for k in 1:nz, j in 1:ny, i in 1:nx
         t_val = Float64(temp[i, j, k])
-        # Salinity is optional: the GeoData store carries u/v/w/T, because that is what the
+        # Salinity is optional: the Tethys store carries u/v/w/T, because that is what the
         # output callback writes. A missing salinity degrades the density to the thermal
         # term against the reference 35 rather than being filled with a constant the run
         # never produced -- a constant would read as observed and shift rho.
@@ -259,7 +259,7 @@ end
 """
     resolve_store_path(path::AbstractString) -> Union{String, Nothing}
 
-The GeoData store at `path`, whether `path` names the run's output directory or the
+The Tethys store at `path`, whether `path` names the run's output directory or the
 store inside it. `nothing` when neither is a store.
 
 `output_zarr_path` appends the store's name, so it answers the directory form only. A
@@ -280,7 +280,7 @@ end
 
 Read the authoritative seabed (metres, negative in the ocean) for a realized run.
 
-`location` is the run's output *directory*, which holds the GeoData store -- the ocean
+`location` is the run's output *directory*, which holds the Tethys store -- the ocean
 half's deliverable, and the path `run_segment_simulation` hands back. The seabed is read
 from the store's own `.zattrs`, where `run_metadata` puts it because it is grid
 metadata that does not vary with time.
@@ -501,7 +501,7 @@ function resolve_land_mask_coastline(
             isfile(candidate) && return load_coastline_polygons(candidate)
         end
     end
-    return GeoDataSources.SCOTIAN_SHELF_COASTLINE
+    return Tethys.SCOTIAN_SHELF_COASTLINE
 end
 
 """
@@ -883,7 +883,7 @@ function extract_hydrodynamic_dataset(
         )
     end
 
-    # 2. GeoData store directory (hydrodynamics.zarr), the ocean half's deliverable
+    # 2. Tethys store directory (hydrodynamics.zarr), the ocean half's deliverable
     #
     # This is the branch a current run uses. `run_segment_simulation` hands back the run's
     # output *directory*, so `hydro_input` arrives as that path; the store inside is the only
@@ -892,16 +892,16 @@ function extract_hydrodynamic_dataset(
     # of a real run silently drew invented flow.
     if hydro_input isa AbstractString && !isnothing(resolve_store_path(hydro_input))
         store = resolve_store_path(hydro_input)
-        # A GeoData read, not a walk over the store's directories. This branch used to open
+        # A Tethys read, not a walk over the store's directories. This branch used to open
         # `.<field>/<m>` itself, take `.zattrs` for the axes and `time.json` for the times, and
         # re-derive the face averaging the writer now does -- three separate hand-rolled reads
-        # of one dataset. The store is a GeoData store, so there is one read and the fields come
+        # of one dataset. The store is a Tethys store, so there is one read and the fields come
         # back already on the grid the dimension records describe.
-        ds = GeoData.geoload(store; backend = :zarr)
+        ds = Tethys.geoload(store; backend = :zarr)
         isempty(ds.variables) && error(
-            "The store at $(store) opens as a GeoData dataset with no variables. It was " *
+            "The store at $(store) opens as a Tethys dataset with no variables. It was " *
             "written by an older writer that placed each interval in its own directory; " *
-            "re-run the simulation to produce a GeoData store.")
+            "re-run the simulation to produce a Tethys store.")
         lons_s = collect(Float64, ds.dims[:lon].coords)
         lats_s = collect(Float64, ds.dims[:lat].coords)
         deps_s = collect(Float64, ds.dims[:depth].coords)

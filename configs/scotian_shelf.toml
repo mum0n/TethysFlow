@@ -1,20 +1,20 @@
 # =============================================================================
-# GeoOceanModel - Scotian Shelf Production Hydrodynamic Configuration
+# TethysFlow - Scotian Shelf Production Hydrodynamic Configuration
 # =============================================================================
 # High-resolution hydrodynamic configuration for the Scotian Shelf and Gulf of
 # Maine. Drives the 3D circulation model using real ETOPO/NWA bathymetry,
 # Open-Meteo ERA5 surface wind forcing, TPXO9 tidal harmonics, and Copernicus
 # Marine GLORYS12V1 boundary relaxation.
 #
-#   julia --project=. GeoOceanModelRun.jl --config=configs/scotian_shelf.toml --all
+#   julia --project=. TethysFlowRun.jl --config=configs/scotian_shelf.toml --all
 # =============================================================================
 
 [domain]
 # Geographic bounding box in degrees (WGS84, EPSG:4326)
 lon_min = -68.0               # Western boundary longitude (°E)
-lon_max = -56.5               # Eastern boundary longitude (°E)
-lat_min = 43.0                # Southern boundary latitude (°N, aligned to shelf slope margin)
-lat_max = 47.5                # Northern boundary latitude (°N)
+lon_max = -56.0               # Eastern boundary longitude (°E)
+lat_min = 41.0                # Southern boundary latitude (°N, aligned to shelf slope margin)
+lat_max = 48.0                # Northern boundary latitude (°N)
 z_min = -350.0                # Maximum shelf bathymetric depth (m, epipelagic & mesopelagic zone).
                                # Ignored when [grid] depths is given: the deepest face is the
                                # floor of the column, and these depths end at 400 m.
@@ -24,23 +24,40 @@ buffer_km = 50.0              # The margin beyond the study area (km). The later
                                # band is this margin: the model relaxes toward the prescribed
                                # ocean across it, so the band is derived from it (about 0.45).
 
+# Map Projection and Orientation
+# Options: "geographic" (default, WGS84 LatitudeLongitudeGrid)
+#          "utm"        (Universal Transverse Mercator via CoordRefSystems.jl, zone = 20)
+#          "lambert"    (Lambert Conformal Conic via CoordRefSystems.jl)
+#          "mercator"   (Mercator projection via CoordRefSystems.jl)
+#          "rotated"    (Conformal local tangent frame rotated along shelf axis)
+projection = "rotated"
+rotation_deg = 55.0           # Grid rotation angle (~55° counter-clockwise from East aligns with shelf margin)
+lon_center = -62.0            # Center longitude of the rotated frame (°E)
+lat_center = 44.5             # Center latitude of the rotated frame (°N)
+extent_along_shelf_km = 1056.0 # Along-shelf extent (km; Browns Bank to Laurentian Channel / Grand Banks margin)
+extent_cross_shelf_km = 384.0  # Cross-shelf extent (km; coastal margin to slope break, excluding abyssal plain)
+
 [grid]
-# 432 x 250 over 11.471 x 4.4625 degrees is 2000 m in x and 2002 m in y: a square
-# cell. The isotropy condition for this domain is nx/ny = 1.727, and 432/250 = 1.728.
-#
-# nz = 16 puts four layers in the 200-300 m band where the shelf-break jet sits
-# (the 225-250 and 250-275 m layers). Raising nz to 20 with the depths list below
-# shifted to 20 m layers through that band costs 25% more and gives the jet six.
-nx = 432
-ny = 250
-nz = 22
+# Rotated along-shelf domain at 2.0 km isotropic horizontal resolution:
+# - dx = 1056.0 km / 528 = 2000.0 m (along-shelf)
+# - dy =  384.0 km / 192 = 2000.0 m (cross-shelf)
+# Both nx=528 and ny=192 are divisible by 16, 24, 48 for parallel decompositions and FFTs.
+# Compared to the unrotated box (480 x 390 = 187,200 cells), total horizontal cells
+# are reduced to 528 x 192 = 101,376 (46% reduction in cell count and runtime).
+nx = 528
+ny = 192
 vertical_stretching_mode = "oceananigans"
 nz_above = 0
 vertical_break_depth = 350.0
 vertical_grid_file = ""
-depths = [0.0, 10.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0, 180, 200.0, 220.0, 240.0, 260.0, 280, 300.0, 325, 350.0, 375.0, 400.0, 1000, 5000]
+nz = 23
+depths = [
+    0.0, 10.0, 20.0, 35.0, 50.0, 75.0, 100.0, 125.0, 150.0, 175.0,
+    200.0, 225.0, 250.0, 275.0, 300.0, 350.0, 400.0, 500.0, 600.0,
+    750.0, 900.0, 1050.0, 1250.0, 1500.0
+]
 
-
+[bathymetry]
 # Real shelf topography and geometry controls
 inshore_depth = 10.0              # Water depth at inshore boundary (m, positive downward)
 shelf_slope = 180.0               # Total shelf relief / rise across shelf (m; break - inshore = 180 m)
@@ -84,22 +101,22 @@ v_inflow = 0.0                # Fallback: zero cross-isobath inflow (m/s)
 # inward dynamically. This avoids the resonance that the uniform analytic
 # body forcing caused (8-13 m/s divergence within 6 hours).
 #
-# GeoLarvalTracking (the larval half) superimposes analytic M2/S2 tidal velocity
+# TethysDrift (the larval half) superimposes analytic M2/S2 tidal velocity
 # onto the stored hydrodynamic flow field at particle-advection time
-# (GeoLarvalTracking/src/biology/larval_behavior.jl:superpose_tidal_velocity).
+# (TethysDrift/src/biology/larval_behavior.jl:superpose_tidal_velocity).
 # DO NOT enable both ocean-model tide and larval-tracking tide simultaneously
 # unless you intend double-counting.
 #
 # For this Scotian Shelf run, tide is enabled in the ocean model at the boundary
-# only (placement = "boundary"). GeoLarvalTracking will add its own analytic
+# only (placement = "boundary"). TethysDrift will add its own analytic
 # tidal velocity at particle time. If you want consistency between the two,
-# disable tide in GeoLarvalTracking or set enable_tides = false here.
+# disable tide in TethysDrift or set enable_tides = false here.
 #
 enable_tides = true             # Enable TPXO9 tidal boundary forcing
 tides_source = "tpxo9"          # TPXO9 global tidal atlas (not "analytic")
-tidal_placement = "both"    # Edge-only relaxation: tide propagates inward dynamically. both, interior, boundary
+tidal_placement = "boundary"    # Edge-only relaxation: tide propagates inward dynamically. both, interior, boundary
 tidal_relaxation_timescale = 3600.0 # 1-hour tidal relaxation timescale at open edges
-tidal_constituents = ["M2", "S2"] # Semidiurnal constituents
+tidal_constituents = ["M2", "S2", "N2"] # Semidiurnal constituents
 tidal_u_amp = 0.0               # Unused with tpxo9 source (amplitudes come from atlas)
 tidal_v_amp = 0.0               # Unused with tpxo9 source
 s2_u_amp = 0.0                  # Unused with tpxo9 source
@@ -135,9 +152,9 @@ cd_drag = 2.5e-3
 sim_duration_hours = 13140.0      # 1.5 yr production run
 sim_dt_seconds = 30.0          # Baseline time step in seconds
 min_dt_seconds = 10.0          # Minimum adaptive time step floor (seconds)
-max_dt_seconds = 360.0         # Maximum adaptive time step ceiling (barotropic-CFL safe at 2 km)
+max_dt_seconds = 260.0         # Maximum adaptive time step ceiling (barotropic-CFL safe at 2 km)
 adaptive_cfl = true           # Modulate dt according to advective and wave CFL
-target_cfl = 0.25             # Target advective CFL limit (increased from 0.08 for stability)
+target_cfl = 0.2             # Target advective CFL limit (increased from 0.08 for stability)
 target_wave_cfl = 0.2        # Target barotropic gravity wave CFL limit (increased from 0.08 for stability)
 surface_heat_flux = 50.0      # Baseline sensible heat flux (W/m^2)
 sst_damping_coefficient = 40.0 # Haney SST relaxation (W m-2 K-1)
@@ -159,7 +176,7 @@ reuse_hydro = false           # Reuse existing flow fields if present
 #   <output_dir>/inputs/              the ingested-data cache for this run
 # There is no separate path setting: a second path for the same store is a second
 # source of truth, and the two disagreeing is a silent data-loss bug.
-output_dir = "../lakehouse/GeoOceanModel/scotian_shelf" # Target Lakehouse directory
+output_dir = "../lakehouse/TethysFlow/scotian_shelf" # Target Lakehouse directory
 output_schedule_seconds = 1800.0 # Field snapshot every 30 min: 337 intervals over 7 days, enough for the tidal cycle to animate
 progress_schedule_seconds = 900.0 # Progress report every 15 min of simulated time (time-based, so the cadence does not drift as Δt ramps)
 max_save_depth = 400.0        # Keep every level (the shelf is 350 m deep) for larval drift
@@ -176,20 +193,9 @@ checkpoint_prefix = "scotian_shelf_checkpoint" # Checkpoint prefix
 #
 # Six hours of simulated time is every ninety iterations, and a restart then loses at
 # most six hours of simulation -- a few minutes of wall clock at this grid.
-checkpoint_schedule_seconds = 864000.0 # Checkpoint every 864000sec=10days of simulated time
+checkpoint_schedule_seconds = 432000.0 # Checkpoint every 5 days of simulated time
 checkpoint_cleanup = false    # Keep multiple checkpoints for safe restart
 run_id = ""                   # Unique identifier
-
-[visualization]
-# Diagnostics and interactive visualization
-interactive_map = true        # Export interactive HTML5 Leaflet map
-animate_hydro = true         # Generate hydrodynamic flow animation
-anim_variable = "dashboard"   # Variable to animate
-anim_fps = 10                 # Animation FPS
-anim_format = "mp4"           # Video format
-anim_depth = -2.5             # Animation depth level (m)
-anim_overlay_particles = false# Overlay Lagrangian particles on flow fields
-anim_output_path = ""         # Video output path
 
 [runtype]
 # Execution environment and reproducibility

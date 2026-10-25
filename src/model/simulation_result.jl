@@ -2,10 +2,10 @@
 #  simulation_result.jl -- the handover between the two halves
 # ==============================================================================
 #
-#  THE ONE COUPLING BETWEEN GeoOceanModel AND GeoLarvalTracking.
+#  THE ONE COUPLING BETWEEN TethysFlow AND TethysDrift.
 #
-#  SPLIT_PLAN.md section 1: "The one coupling is therefore the output file. There is no import
-#  edge from GeoLarvalTracking to GeoOceanModel, and no shared TOML." This file is that
+#  The one coupling is therefore the output file. There is no import
+#  edge from TethysDrift to TethysFlow, and no shared TOML. This file is that
 #  coupling, written down.
 #
 #  What crosses the boundary is a LOCATION and the METADATA BESIDE IT, and nothing else. A
@@ -264,7 +264,7 @@ end
 
 function _read_metadata_from_jld2_archive(path::AbstractString)
     recorded = Dict{Symbol, Any}()
-    # JLD2 is a dependency of this package (ParticleTracking.jl `using JLD2`), so it is in
+    # JLD2 is a dependency of this package (TethysFlow.jl `using JLD2`), so it is in
     # scope here. The try/catch is for a caller that loaded this file into a context where
     # it is not, and reports that rather than failing at an undefined symbol.
     can_read = try

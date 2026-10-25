@@ -27,20 +27,20 @@ end
 # ╔═╡ c4e3f70a-95b2-4ca4-9b1d-6c5f4a3d9e48
 # ╠═╡
 # Activating the package directory from inside the notebook means Pluto's own environment never
-# needs this package, and `using GeoOceanModel` sees the working tree.
+# needs this package, and `using TethysFlow` sees the working tree.
 Pkg.activate(normpath(joinpath(@__DIR__, "..")))
 
 # ╔═╡ d5f4081b-0a63-4db5-9c2e-7d6f5b4e0f59
 # ╠═╡
-using GeoOceanModel
+using TethysFlow
 
 # ╔═╡ 1e0b94f7-6c82-4d51-9b7a-3f8e2c0a6b15
 # ╠═╡
 md"""
 # Cape Breton ocean model — the keyless demonstration
 
-Work with the `default` domain end to end: resolve the seabed through the GeoData layer, build the
-immersed grid, assemble the hydrostatic model, run the simulation, and read the resulting GeoData
+Work with the `default` domain end to end: resolve the seabed through the Tethys layer, build the
+immersed grid, assemble the hydrostatic model, run the simulation, and read the resulting Tethys
 store back.
 
 Every input here is keyless: ETOPO 2022 bathymetry, WOA23 climatology, Open-Meteo winds,
@@ -71,7 +71,7 @@ julia -e 'using Pluto; Pluto.run()'
 
 The first three cells pin the working directory, activate **this package's environment**, and load
 the package, so the `../lakehouse/...` paths in the configs resolve to `projects/lakehouse/` rather
-than to a directory inside the package, and `using GeoOceanModel` loads the working tree.
+than to a directory inside the package, and `using TethysFlow` loads the working tree.
 
 `Pluto` is deliberately **not** a dependency of this package: a notebook is how you look at the
 work, not something the run needs.
@@ -118,7 +118,7 @@ md"""
 the dictionary into the flat `HydrodynamicOptions` record every segment consumes. The two-step
 split matters: the first is data you can inspect and edit, the second is what the code runs on.
 
-`OUTDIR` below is where the run writes — the fetched bathymetry, coastline and winds, the GeoData
+`OUTDIR` below is where the run writes — the fetched bathymetry, coastline and winds, the Tethys
 store, and the checkpoint. It is written into the configuration **before** the options are built,
 so no TOML is ever edited. Point it at an absolute path to keep a scratch run out of the shared
 lakehouse.
@@ -126,9 +126,9 @@ lakehouse.
 
 # ╔═╡ 193d4c5f-4e01-4f29-9b60-1b0f9f8a4d9e
 # ╠═╡
-import GeoOceanModel: load_configuration, configuration_to_options
+import TethysFlow: load_configuration, configuration_to_options
 
-const OUTDIR = normpath(joinpath("..", "lakehouse", "GeoOceanModel", RUN))
+const OUTDIR = Tethys.lakehouse_dir("TethysFlow", RUN)
 
 cfg = load_configuration(joinpath("configs", string(RUN, ".toml")))
 cfg["storage"]["output_path"] = OUTDIR
@@ -175,7 +175,7 @@ it is a property of this domain on this relief.
 
 # ╔═╡ 3b5f6e71-60a3-4e4b-9c82-3d2f1b0c6f1a
 # ╠═╡
-import GeoOceanModel: run_segment_data, _run_bathymetry
+import TethysFlow: run_segment_data, _run_bathymetry
 
 data_res = run_segment_data(; opts = opts)
 
@@ -215,7 +215,7 @@ above a resolved deep one.
 
 # ╔═╡ 5d710893-82c5-4e6d-9a04-5f4b3d2e8b3c
 # ╠═╡
-import GeoOceanModel: run_segment_grid
+import TethysFlow: run_segment_grid
 
 grid_res = run_segment_grid(; opts = opts)
 
@@ -276,94 +276,53 @@ inputs. This is the slow cell — the first interval compiles the turbulent-clos
 
 # ╔═╡ 7f9320b5-0a47-4e8a-9c26-7b6d5f4a0d5e
 # ╠═╡
-import GeoOceanModel: run_segment_model
-
-built = run_segment_model(; opts = opts, immersed_grid = grid_res.immersed_grid)
-
-println("Simpson-Hunter, shallow bank : ", built.simpson_hunter_bank)
-println("Simpson-Hunter, deep shelf    : ", built.simpson_hunter_shelf)
-built
-
-# ╔═╡ 0a0431c6-1b58-4e9b-9d37-8c7e6f5b1e6f
-# ╠═╡
-md"""
-## Run the simulation, and what it writes
-
-`run_segment_simulation` advances the model and writes the flow into the GeoData store. On the
-CLI, `--all` is exactly these cells plus the data and grid segments.
-
-### The output cadence is its own decision
-
-`[storage] output_schedule_seconds = 21600` — one snapshot every 6 hours, independent of
-`checkpoint_schedule_seconds`. The two were once the same knob; separating them is the point,
-because a 6-hour field cadence over a 3-day run is 13 intervals, while a checkpoint cadence
-decides how much work a crash loses. Cadence is a disk and animation choice; checkpoint cadence
-is a recovery choice.
-
-### What lands in the store
-
-- **u, v, w, T per interval** — the store keeps the model's native stagger, and the reader blends
-  it to cell centres.
-- **the grid's coordinates** travel inside the store's attributes, alongside `time.json`, so the
-  handover is a directory with nothing beside it.
-- **no salinity**, as above.
-
-Re-running with a larger `sim_duration_hours` resumes from the checkpoint, rather than starting
-over.
-"""
+# Manual execution switch: defaults to false so opening the notebook does NOT run the model.
+# Set `run_model = true` ONLY when intending to perform numerical integration and overwrite/update the lakehouse store.
+run_model = false
 
 # ╔═╡ d0000001-0001-0001-0001-000000000006
 # ╠═╡
 md"""
-## Running the simulation
+## Running the simulation or loading lakehouse results
 
-This notebook **reads** a completed run; it does not integrate the model. The code that does
-the integration is shown here for the record, and is run from the command line:
-
-```bash
-julia --project=. GeoOceanModelRun.jl --config=$(opts.config_file) --all --overwrite
-```
-
-or, equivalently, from inside a Julia session with this package loaded:
-
-```julia
-import GeoOceanModel: run_segment_data, run_segment_grid, run_segment_model, run_segment_simulation
-opts  = GeoOceanModel.configuration_to_options("$(opts.config_file)")
-data  = run_segment_data(; opts = opts)
-grid  = run_segment_grid(; opts = opts)
-built = run_segment_model(; opts = opts, immersed_grid = grid.immersed_grid)
-res   = run_segment_simulation(; opts = opts, model = built.model)
-```
-
-`--overwrite` clears a previous store first; without it a re-run resumes from the checkpoint.
-The next cell loads whatever the store holds. If there is no store, it stops and says which
-command produces one — the decision to run a multi-hour integration belongs to you, not to a
-notebook cell.
+> ⚠️ **WARNING: STORE OVERWRITE HAZARD**
+>
+> Setting `run_model = true` initiates numerical integration using `Oceananigans.jl`.
+> Running the model manually may **overwrite or modify existing simulation data and checkpoints**
+> stored in the lakehouse directory:
+>
+> `$(opts.output_dir)`
+>
+> By default, `run_model = false`, loading previously computed lakehouse results for analysis and plotting.
 """
 
 # ╔═╡ 1b1542d7-2c69-4e0c-9e48-9d8f7a6c2f70
 # ╠═╡
-import GeoOceanModel: output_zarr_path
-
-# The simulation is NOT run here. The code that runs it is shown above, for the record;
-# this cell only reads what a previous run left in the store. If the store is absent,
-# this cell stops and says so, rather than starting a run that would take hours.
+import TethysFlow: output_zarr_path, run_segment_model, run_segment_simulation
 
 sim_res = begin
     expected_store = output_zarr_path(opts.output_dir)
     store_exists = isdir(expected_store) && !isempty(readdir(expected_store))
 
-    if !store_exists
-        error(
-            "No hydrodynamic store at $(expected_store).\n" *
-            "This notebook reads a completed run; it does not run the model.\n" *
-            "To produce one, run either\n" *
-            "    julia --project=. GeoOceanModelRun.jl --config=$(opts.config_file) --all --overwrite\n" *
-            "from the package root, or uncomment the `run_segment_simulation` line in the cell above.")
+    if run_model
+        @warn "Executing numerical integration: this will update/overwrite store at $(expected_store)"
+        println("Assembling hydrodynamic model...")
+        built = run_segment_model(; opts = opts, immersed_grid = grid_res.immersed_grid)
+        println("Running simulation integration...")
+        res = run_segment_simulation(; opts = opts, model = built.model)
+        (output_path = opts.output_dir, model = built.model)
+    else
+        if !store_exists
+            error(
+                "No hydrodynamic store found at $(expected_store).\n" *
+                "By default, this notebook loads existing lakehouse simulation results.\n" *
+                "To execute the simulation manually and create the store, set `run_model = true` in the cell above,\n" *
+                "or run from the command line:\n" *
+                "    julia --project=. TethysFlowRun.jl --config=$(opts.config_file) --all --overwrite")
+        end
+        println("Loading saved lakehouse hydrodynamic solution from: ", expected_store)
+        (output_path = opts.output_dir, model = nothing)
     end
-
-    println("Reading hydrodynamic solution from: ", expected_store)
-    (output_path = opts.output_dir, model = built.model)
 end
 
 # ╔═╡ 2c2653e8-3d7a-4e1d-9a59-0e9f8b7d3a81
@@ -387,11 +346,11 @@ Three checks that mean "this is the real run and not the synthetic fallback":
 
 # ╔═╡ 3d3764f9-4e8b-4e2e-9b6a-1f0a9c8e4b92
 # ╠═╡
-import GeoOceanModel: extract_hydrodynamic_dataset, output_zarr_path
-using GeoData
+import TethysFlow: extract_hydrodynamic_dataset, output_zarr_path
+using Tethys
 
 store_dir = output_zarr_path(sim_res.output_path)
-_times = Float64.(collect(GeoData.geoload(store_dir; backend = :zarr).coords[:time].data))
+_times = Float64.(collect(Tethys.geoload(store_dir; backend = :zarr).coords[:time].data))
 
 println("store     : ", store_dir)
 println("intervals : ", length(_times), " (expected ", opts.sim_duration / opts.output_schedule_seconds + 1, ")")
@@ -424,8 +383,8 @@ A single column is where stratification is legible.
 
 # ╔═╡ 60a697c2-71be-4e5b-9e9d-4c3d2f1b7e25
 # ╠═╡
-import GeoOceanModel: compute_hydrodynamic_diagnostics
-import GeoOceanModel: animate_hydrodynamic_field
+import TethysFlow: compute_hydrodynamic_diagnostics
+import TethysFlow: animate_hydrodynamic_field
 
 using Statistics
 diag = compute_hydrodynamic_diagnostics(ds.lons, ds.lats, ds.depths, ds.u, ds.v, ds.w, ds.temperature, ds.salinity)
@@ -664,7 +623,6 @@ Knobs worth turning first, in the order they matter:
 # ╠═5d710893-82c5-4e6d-9a04-5f4b3d2e8b3c
 # ╠═6e8219a4-93d6-4e7f-9b15-6a5c4e3f9c4d
 # ╠═7f9320b5-0a47-4e8a-9c26-7b6d5f4a0d5e
-# ╠═0a0431c6-1b58-4e9b-9d37-8c7e6f5b1e6f
 # ╠═d0000001-0001-0001-0001-000000000006
 # ╠═1b1542d7-2c69-4e0c-9e48-9d8f7a6c2f70
 # ╠═2c2653e8-3d7a-4e1d-9a59-0e9f8b7d3a81

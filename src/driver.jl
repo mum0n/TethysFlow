@@ -2,11 +2,11 @@
 #  driver.jl -- the ocean half's run segments, as library code
 # ==============================================================================
 #
-#  The segment functions `ParticleTrackingRun.jl` held as a script, moved here so
-#  `GeoOceanModelRun.jl` can dispatch to them and `Pkg.test` can reach them: a
+#  The segment functions for hydrodynamic execution, located here so
+#  `TethysFlowRun.jl` can dispatch to them and `Pkg.test` can reach them: a
 #  script that defines the behaviour is a script nobody can test.
 #
-#  Included LAST in `GeoOceanModel.jl`, after the model builders and the store
+#  Included LAST in `TethysFlow.jl`, after the model builders and the store
 #  writer, so every name these bodies reach for (`build_shelf_grid`,
 #  `build_hydrodynamic_model`, the tidal helpers, `attach_output_callback!`, ...)
 #  is already defined when a call happens.
@@ -14,7 +14,7 @@
 #  What is NOT here: the lar**val** segments and the larval results/analytics
 #  API. `run_production_pipeline` reaches `run_segment_tracking` and its
 #  siblings on the path past the hand-over, and under the split each is a stub
-#  that names where it really lives (`GeoLarvalTracking`), so the coupling is at
+#  that names where it really lives (`TethysDrift`), so the coupling is at
 #  the call site rather than a `MethodError` later.
 #
 #  NO `using` statements. The module imports Oceananigans, `prettytime`, the
@@ -27,14 +27,14 @@
     resolve_hydro_model_path(opts::HydrodynamicOptions, default_filename::String) -> Tuple{String, String}
 
 Resolve this run's model-file base path and name -- the Oceananigans restart checkpoint,
-not a deliverable. The fields a consumer reads live in the GeoData store at
+not a deliverable. The fields a consumer reads live in the Tethys store at
 `dirname(...)/hydrodynamics.zarr`, written by the output callback; this file is what
 `pickup` resumes from, so `dirname` is what anchors the store and the checkpoints.
 
 If `opts.hydro_model_file` is specified it is used directly (or resolved relative to
 `opts.output_dir` when a bare name is given); if empty it is
 `joinpath(opts.output_dir, default_filename)`. Its directory is the run's output directory,
-where the GeoData store is written, and the base names the JLD2 restart checkpoint; the store
+where the Tethys store is written, and the base names the JLD2 restart checkpoint; the store
 itself is `output_zarr_path(dirname(...))`.
 
 # Inputs
@@ -82,25 +82,22 @@ end
 """
     _woa_store_locations(opts::HydrodynamicOptions) -> Vector{String}
 
-Where WOA23 already lives in the GeoData store. Each variable is ~900 MB, so a store copy is
+Where WOA23 already lives in the Tethys store. Each variable is ~900 MB, so a store copy is
 reused, never re-downloaded: this run's input dir first, then the package's own `inputs/`,
 then every `work/*/inputs` and `outputs/*/inputs` a prior run left, then the stores of the
 other halves. `woa23_in_store` picks the first copy that exists.
 """
 function _woa_store_locations(opts::HydrodynamicOptions)
-    root = dirname(@__DIR__)   # the GeoOceanModel package directory
-    # The central GeoData store first (projects/lakehouse/GeoData/woa23), then the run and
-    # its siblings, then the umbrella's. Reading the central copy means a ~1.8 GB
-    # climatology is fetched once per machine, not once per run.
-    dirs = AbstractString[GeoDataSources.store_path("woa23"), opts.input_dir, joinpath(root, "inputs")]
-    for scan in (joinpath(root, "work"), joinpath(root, "outputs"),
-                 joinpath(root, "..", "ParticleTracking", "outputs"))
+    root = dirname(@__DIR__)   # the TethysFlow package directory
+    # The central Tethys store first (projects/lakehouse/Tethys/woa23), then the run and
+    # its siblings. Reading the central copy means a ~1.8 GB climatology is fetched once
+    # per machine, not once per run.
+    dirs = AbstractString[Tethys.store_path("woa23"), opts.input_dir, joinpath(root, "inputs")]
+    for scan in (joinpath(root, "work"), joinpath(root, "outputs"))
         isdir(scan) && for d in readdir(scan; join = true)
             push!(dirs, joinpath(d, "inputs"))
         end
     end
-    push!(dirs, joinpath(root, "..", "ParticleTracking", "inputs"))
-    push!(dirs, joinpath(root, "..", "ParticleTracking", "work", "snowcrab", "inputs"))
     return String[dirs...]
 end
 
@@ -123,7 +120,7 @@ end
 """
     _store_sim_info(store_path; stop_time) -> (; exists, is_complete, last_time, n_timesteps)
 
-Resume/reuse state of a run's GeoData store, read from the store's own `time` coordinate. This
+Resume/reuse state of a run's Tethys store, read from the store's own `time` coordinate. This
 is a `geoload` read of the same axis the writer filled, so the record of progress is the store
 itself and cannot drift from what it recorded -- which a `time.json` sidecar could, and did:
 a sidecar written per interval and a coordinate written per interval are two writes of the same
@@ -137,7 +134,7 @@ is also the record of progress.
 function _store_sim_info(store_path::AbstractString; stop_time::Real)
     stored = if isdir(store_path)
         try
-            ds = GeoData.geoload(store_path; backend = :zarr)
+            ds = Tethys.geoload(store_path; backend = :zarr)
             isempty(ds.variables) ? Float64[] :
                 collect(Float64, ds.coords[:time].data)
         catch
@@ -163,7 +160,7 @@ does not exist or has no slices, so a caller resuming a fresh directory starts a
 function store_interval_count(store_path::AbstractString)
     isdir(store_path) || return 0
     try
-        ds = GeoData.geoload(store_path; backend = :zarr)
+        ds = Tethys.geoload(store_path; backend = :zarr)
         return isempty(ds.variables) ? 0 : length(ds.coords[:time].data)
     catch
         return 0
@@ -183,7 +180,7 @@ everywhere else. Every segment asks through here, so they cannot disagree about 
 floor.
 """
 function _run_bathymetry_source(opts::HydrodynamicOptions)
-    return GeoDataSources.preferred_bathymetry_source(;
+    return Tethys.preferred_bathymetry_source(;
         source = opts.bathy_source,
         lon_range = opts.domain_lon,
         lat_range = opts.domain_lat
@@ -217,29 +214,29 @@ function _run_bathymetry(; opts::HydrodynamicOptions, force::Bool = false)
     output_path = _run_bathymetry_path(opts)
     
     # Fast path: If the bathymetry dataset has already been fetched and cached,
-    # load it directly via GeoData.geoload without invoking GeoDataSources.
+    # load it directly via Tethys.geoload without invoking GeoDataSources.
     if !force && (isfile(output_path) || isdir(output_path))
-        ds = GeoData.geoload(output_path)
+        ds = Tethys.geoload(output_path)
         elev_var = haskey(ds.variables, "elevation") ? "elevation" :
-                   first(GeoData.variables_like(ds, ["elevation", "altitude", "z", "topo"]))
+                   first(Tethys.variables_like(ds, ["elevation", "altitude", "z", "topo"]))
         elev_ga = ds.variables[elev_var]
-        perm = GeoData.dim_permutation(elev_ga.dims, :lon, :lat)
-        lon, _ = GeoData.axis(ds, :lon)
-        lat, _ = GeoData.axis(ds, :lat)
+        perm = Tethys.dim_permutation(elev_ga.dims, :lon, :lat)
+        lon, _ = Tethys.axis(ds, :lon)
+        lat, _ = Tethys.axis(ds, :lat)
         raw = Array{Float64}(elev_ga.data)
         elevation = ndims(raw) == 1 ? reshape(raw, :, 1) : permutedims(raw, perm)
         return (source = source, output_path = output_path, elevation = elevation,
                 lon = lon, lat = lat)
     end
 
-    bathy = GeoDataSources.bathymetry_field(;
+    bathy = Tethys.bathymetry_field(;
         source = source,
         lon_range = opts.domain_lon,
         lat_range = opts.domain_lat,
         output_path = output_path,
         force = force
     )
-    println("Bathymetry source: $(source) (", GeoDataSources.BATHYMETRY_SOURCES[source], ")")
+    println("Bathymetry source: $(source) (", Tethys.BATHYMETRY_SOURCES[source], ")")
     return (source = source, output_path = output_path, elevation = bathy.elevation,
             lon = bathy.lon, lat = bathy.lat)
 end
@@ -325,10 +322,10 @@ function run_segment_data(; opts::HydrodynamicOptions = HydrodynamicOptions())
             # `resolved_cache_path`, not the raw `.cache` template: the template names
             # `<store>`, and a test that substitutes only `<output_dir>` looks at a
             # `<store>/tpxo9/...` directory that never exists, so it re-fetches every run.
-            tides_file = GeoDataSources.resolved_cache_path(:tides, opts.output_dir)
+            tides_file = Tethys.resolved_cache_path(:tides, opts.output_dir)
             if !isfile(tides_file)
                 println("Retrieving tidal solution ($(opts.tides_source))...")
-                tides_res = GeoDataSources.fetch_input(:tides, opts.output_dir)
+                tides_res = Tethys.fetch_input(:tides, opts.output_dir)
                 tides_file = tides_res isa AbstractString ? String(tides_res) : tides_file
             end
             println("Tidal solution: $tides_file")
@@ -441,6 +438,18 @@ function run_segment_grid(; opts::HydrodynamicOptions = HydrodynamicOptions())
         nothing
     end
 
+    proj = create_projection(
+        projection = opts.projection,
+        zone = opts.projection_zone,
+        lat_1 = opts.projection_lat1,
+        lat_2 = opts.projection_lat2,
+        lon_center = opts.lon_center,
+        lat_center = opts.lat_center,
+        rotation_deg = opts.rotation_deg,
+        extent_x = opts.extent_x_km * 1000.0,
+        extent_y = opts.extent_y_km * 1000.0,
+    )
+
     base_grid = build_shelf_grid(
         architecture = opts.use_gpu ? :gpu : :cpu,
         lon_range = opts.domain_lon,
@@ -448,7 +457,12 @@ function run_segment_grid(; opts::HydrodynamicOptions = HydrodynamicOptions())
         z_range = opts.domain_z,
         z_faces = z_faces,
         grid_size = opts.grid_size,
-        fallback_to_cpu = opts.fallback_to_cpu
+        fallback_to_cpu = opts.fallback_to_cpu,
+        projection = proj,
+        lon_center = opts.lon_center,
+        lat_center = opts.lat_center,
+        extent_x = opts.extent_x_km * 1000.0,
+        extent_y = opts.extent_y_km * 1000.0,
     )
 
     println("Constructing immersed boundary by 2D bilinear regridding...")
@@ -458,13 +472,21 @@ function run_segment_grid(; opts::HydrodynamicOptions = HydrodynamicOptions())
         output_path = _run_bathymetry_path(opts),
         min_water_depth = abs(opts.inshore_depth),
         max_water_depth = 1500.0,
-        mask_bay_of_fundy = opts.mask_bay_of_fundy
+        mask_bay_of_fundy = opts.mask_bay_of_fundy,
+        projection = proj,
     )
 
     println("Grid summary:")
-    println("  Orientation: Standard geographic grid")
-    println("  Longitude:   $(opts.domain_lon[1])°E to $(opts.domain_lon[2])°E (Nx=$(opts.grid_size[1]))")
-    println("  Latitude:    $(opts.domain_lat[1])°N to $(opts.domain_lat[2])°N (Ny=$(opts.grid_size[2]))")
+    if is_planar(proj)
+        println("  Projection:  $(proj) (planar RectilinearGrid)")
+        println("  Rotation:    $(opts.rotation_deg)°")
+        println("  Domain X:    $(-0.5 * opts.extent_x_km) to $(0.5 * opts.extent_x_km) km (Nx=$(opts.grid_size[1]))")
+        println("  Domain Y:    $(-0.5 * opts.extent_y_km) to $(0.5 * opts.extent_y_km) km (Ny=$(opts.grid_size[2]))")
+    else
+        println("  Orientation: Standard geographic grid (LatitudeLongitudeGrid)")
+        println("  Longitude:   $(opts.domain_lon[1])°E to $(opts.domain_lon[2])°E (Nx=$(opts.grid_size[1]))")
+        println("  Latitude:    $(opts.domain_lat[1])°N to $(opts.domain_lat[2])°N (Ny=$(opts.grid_size[2]))")
+    end
     println("  Depth:     $(opts.domain_z[1]) m to $(opts.domain_z[2]) m (Nz=$(opts.grid_size[3]))")
     if !isnothing(z_faces)
         src = isempty(opts.vertical_grid_file) ? "stretched" : basename(opts.vertical_grid_file)
@@ -473,7 +495,7 @@ function run_segment_grid(; opts::HydrodynamicOptions = HydrodynamicOptions())
         println("  Vertical:  Oceananigans default (nz=$(opts.grid_size[3]) evenly spaced faces)")
     end
 
-    return (base_grid = base_grid, immersed_grid = immersed_grid)
+    return (base_grid = base_grid, immersed_grid = immersed_grid, projection = proj)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -502,10 +524,27 @@ buoyancy, surface wind boundary conditions, and semi-diurnal tidal body forcing 
 function run_segment_model(;
     opts::HydrodynamicOptions = HydrodynamicOptions(),
     immersed_grid = nothing,
+    projection = nothing,
     tau_x::Real = 1e-4,
     tau_y::Real = 0.0,
     wind_file::AbstractString = ""
 )
+    proj = if projection !== nothing
+        projection
+    else
+        create_projection(
+            projection = opts.projection,
+            zone = opts.projection_zone,
+            lat_1 = opts.projection_lat1,
+            lat_2 = opts.projection_lat2,
+            lon_center = opts.lon_center,
+            lat_center = opts.lat_center,
+            rotation_deg = opts.rotation_deg,
+            extent_x = opts.extent_x_km * 1000.0,
+            extent_y = opts.extent_y_km * 1000.0,
+        )
+    end
+
     target_grid = if isnothing(immersed_grid)
         grid_res = run_segment_grid(opts = opts)
         grid_res.immersed_grid
@@ -530,10 +569,10 @@ function run_segment_model(;
     tidal_forcing = if opts.enable_tides
         src_str = lowercase(strip(String(opts.tides_source)))
         if !(src_str in ("analytic", "synthetic", "none", "off", "false"))
-            tides_file = GeoDataSources.resolved_cache_path(:tides, opts.output_dir)
+            tides_file = Tethys.resolved_cache_path(:tides, opts.output_dir)
             if !isfile(tides_file)
                 println("Tidal solution missing at $(tides_file); retrieving via fetch_input(:tides)...")
-                tides_res = GeoDataSources.fetch_input(:tides, opts.output_dir)
+                tides_res = Tethys.fetch_input(:tides, opts.output_dir)
                 tides_file = tides_res isa AbstractString ? String(tides_res) : tides_file
             end
             if !isfile(tides_file)
@@ -872,6 +911,7 @@ end
         mask_bay_of_fundy = opts.mask_bay_of_fundy,
         active_boundaries = opts.active_boundaries,
         tidal_placement = opts.tidal_placement,
+        projection = proj,
     )
 
     # Initial thermal and haline stratification.
@@ -892,18 +932,18 @@ end
         o_file = _woa_in_store(opts, "oxygen", month_str)
         if !isempty(t_file) || !isempty(s_file)
             println("WOA23 resolved $(isempty(t_file) ? "?" : basename(t_file)) / " *
-                    "$(isempty(s_file) ? "?" : basename(s_file)) from the GeoData store.")
+                    "$(isempty(s_file) ? "?" : basename(s_file)) from the Tethys store.")
         end
 
         if isempty(t_file) || isempty(s_file)
-            println("Fetching WOA23 climatology via GeoDataSources...")
+            println("Fetching WOA23 climatology via Tethys...")
             woa_res = fetch_open_woa_climatology(
                 lon_range = opts.domain_lon,
                 lat_range = opts.domain_lat,
                 month = opts.hydrography_month,
-                # WOA23 is a shared, machine-level product; it lands in the central GeoData
-                # store (GeoDataSources.store_path("woa23")) rather than this run's inputs.
-                output_dir = GeoDataSources.store_path("woa23")
+                # WOA23 is a shared, machine-level product; it lands in the central Tethys
+                # store (Tethys.store_path("woa23")) rather than this run's inputs.
+                output_dir = Tethys.store_path("woa23")
             )
             # Re-resolve through the same resolver the check above used, not through this
             # run's input directory. The fetch writes to the store, so looking for the result
@@ -927,7 +967,8 @@ end
                     "(month=$(opts.hydrography_month == 0 ? "annual" : opts.hydrography_month), source=$(basename(t_file)))...")
             woa = woa23_regridded_tracers(
                 model.grid, t_file, s_file;
-                oxygen_file = !isempty(o_file) ? o_file : nothing
+                oxygen_file = !isempty(o_file) ? o_file : nothing,
+                projection = proj
             )
             # Separate `set!` calls: Oceananigans has no NamedTuple form of `set!`, and the
             # closures are only accepted as keyword values for the tracer fields.
@@ -944,13 +985,13 @@ end
             error(
                 "hydrography_source = \"woa23\" but WOA23 files are missing from " *
                 "$(opts.input_dir) (expected NetCDF or Zarr format for temperature and salinity). " *
-                "Download them via GeoDataSources or check network access to NOAA NCEI. " *
+                "Download them via Tethys or check network access to NOAA NCEI. " *
                 "To use the analytic profile instead, set [data] hydrography_source = \"synthetic\" in your config."
             )
         end
     elseif hydro_src in (:glorys12v1, :glorys_climatology, :copernicus, :cmesms)
         if boundary_tracer_data !== nothing && hasproperty(boundary_tracer_data, :T) && hasproperty(boundary_tracer_data, :S)
-            println("Initializing hydrography from GeoData boundary tracer field ($hydro_src)...")
+            println("Initializing hydrography from Tethys boundary tracer field ($hydro_src)...")
             set!(model, T = boundary_tracer_data.T, S = boundary_tracer_data.S)
             set!(model, u = 0.0, v = 0.0)
 
@@ -1040,7 +1081,7 @@ and execute the regional hydrodynamic integration.
 - `model`: Configured `HydrostaticFreeSurfaceModel`.
 
 # Outputs
-- `NamedTuple`: `(simulation, output_path, checkpoint_path)` — `output_path` is the GeoData
+- `NamedTuple`: `(simulation, output_path, checkpoint_path)` — `output_path` is the Tethys
   output store, `checkpoint_path` the JLD2 restart checkpoint.
 """
 function run_segment_simulation(;
@@ -1057,7 +1098,7 @@ function run_segment_simulation(;
     # replaced inspecting a JLD2 timeseries archive, which is no longer written.
     file_info = _store_sim_info(store_path; stop_time = opts.sim_duration)
     if file_info.exists
-        println("Existing GeoData store at $(store_path): reaching " *
+        println("Existing Tethys store at $(store_path): reaching " *
                 "$(round(file_info.last_time / 3600.0, digits = 2)) h over " *
                 "$(file_info.n_timesteps) snapshot(s).")
     end
@@ -1068,10 +1109,10 @@ function run_segment_simulation(;
         println(" [Segment 5/8] Hydrodynamic Simulation Time Stepping")
         println("=================================================================")
         if file_info.exists && file_info.n_timesteps > 0
-            println("Using existing GeoData store from: $(store_path)")
+            println("Using existing Tethys store from: $(store_path)")
             return (simulation = nothing, output_path = store_path)
         else
-            error("Cannot run in --track-only mode: no GeoData store with snapshots at $(store_path)\n" *
+            error("Cannot run in --track-only mode: no Tethys store with snapshots at $(store_path)\n" *
                   "Please run with --hydro-only first or specify an existing store with --hydro-model=<path>.")
         end
     end
@@ -1083,9 +1124,9 @@ function run_segment_simulation(;
         println(" [Segment 5/8] Hydrodynamic Simulation Time Stepping")
         println("=================================================================")
         if file_info.is_complete
-            println("Reusing completed GeoData store from: $(store_path)")
+            println("Reusing completed Tethys store from: $(store_path)")
         else
-            println("Reusing GeoData store from: $(store_path)")
+            println("Reusing Tethys store from: $(store_path)")
             println("  Notice: $(file_info.n_timesteps) snapshot(s) present (up to $(round(file_info.last_time / 3600.0, digits=2)) h).")
         end
         return (simulation = nothing, output_path = store_path)
@@ -1132,7 +1173,7 @@ function run_segment_simulation(;
 
     discard_run!(reason) = begin
         println(reason)
-        println("  Discarding the GeoData store and its checkpoints; starting from t = 0.")
+        println("  Discarding the Tethys store and its checkpoints; starting from t = 0.")
         ispath(store_path) && rm(store_path; recursive = true, force = true)
         cpdir = joinpath(out_dir_target, "checkpoints")
         isdir(cpdir) && for f in readdir(cpdir; join = true)
@@ -1158,7 +1199,7 @@ function run_segment_simulation(;
 
     resume = false
     if opts.overwrite
-        discard_run!("Flag --overwrite requested: purging existing GeoData store and checkpoints.")
+        discard_run!("Flag --overwrite requested: purging existing Tethys store and checkpoints.")
     elseif file_info.exists && !file_info.is_complete && file_info.last_time <= 0
         discard_run!("Existing store $(basename(store_path)) is incomplete with no recorded progress.")
     elseif file_info.exists && failed_before && opts.auto_restart
@@ -1213,7 +1254,7 @@ function run_segment_simulation(;
     cp_dir_target = isempty(opts.checkpoint_dir) ?
         joinpath(out_dir_target, "checkpoints") : opts.checkpoint_dir
 
-    # Where this invocation writes: the GeoData store beside this run's outputs. A resume
+    # Where this invocation writes: the Tethys store beside this run's outputs. A resume
     # appends to it (the writer keeps the interval already written); a fresh run replaces it.
     # There are no `_partN` JLD2 archives any more -- the store is the deliverable, and its
     # own `time` coordinate is the record of progress the resume/reuse logic reads back.
@@ -1237,7 +1278,7 @@ function run_segment_simulation(;
             cp_candidate, size(target_model.velocities.u.data))
         if !cp_ok && ispath(store_path)
             try
-                ds = GeoData.geoload(store_path; backend = :zarr)
+                ds = Tethys.geoload(store_path; backend = :zarr)
                 t_last = Float64(last(ds.coords[:time].data))
                 if haskey(ds.variables, "T")
                     Oceananigans.set!(target_model; T = ds.variables["T"].data[:, :, :, end])
@@ -1286,7 +1327,7 @@ function run_segment_simulation(;
                                            spinup_seconds = spinup_sec,
                                            max_save_depth = opts.max_save_depth)
     @assert output_store == store_path "output store drifted from the resume/reuse target"
-    println("Ocean output is a GeoData store: $(output_store)")
+    println("Ocean output is a Tethys store: $(output_store)")
 
     println("Integrating hydrostatic primitive equations...")
     run_hydrodynamic_simulation!(
@@ -1297,7 +1338,7 @@ function run_segment_simulation(;
 
     completed_sim = sim.model.clock.time >= (sim.stop_time - 1e-3)
     if completed_sim
-        println("Simulation completed successfully; output written to the GeoData store: $(output_store)")
+        println("Simulation completed successfully; output written to the Tethys store: $(output_store)")
     else
         println("Simulation paused/interrupted at $(prettytime(sim.model.clock.time)); state saved to checkpoints.")
     end
@@ -1508,7 +1549,7 @@ Step 6 onwards is the larval half's job: `run_segment_tracking`, `run_segment_me
 `run_segment_visualize` are stubs that say so, so a call that continues past the handover
 fails with that message rather than silently running one entry point's two halves' work.
 The pipeline is two commands with the handover file between them
-(`GeoOceanModelRun.jl` then `GeoLarvalTrackingRun.jl`).
+(`TethysFlowRun.jl` then `TethysDriftRun.jl`).
 
 # Inputs
 - `opts::HydrodynamicOptions`: Workflow options.
@@ -1537,6 +1578,7 @@ function run_production_pipeline(; opts::HydrodynamicOptions = HydrodynamicOptio
         model_res = run_segment_model(
             opts = opts,
             immersed_grid = grid_res.immersed_grid,
+            projection = grid_res.projection,
             tau_x = data_res.tau_x,
             tau_y = data_res.tau_y
         )
@@ -1567,7 +1609,7 @@ function run_production_pipeline(; opts::HydrodynamicOptions = HydrodynamicOptio
             viz_res = (animation = anim_file,)
         end
 
-        # No storage session to close: the ocean output is the GeoData Zarr store written
+        # No storage session to close: the ocean output is the Tethys Zarr store written
         # incrementally by the attached callback (`sim_res.output_path`), which a reader
         # opens by path whenever it needs it.
         println("=================================================================")
@@ -1597,7 +1639,7 @@ function run_production_pipeline(; opts::HydrodynamicOptions = HydrodynamicOptio
     println(" Complete Workflow Pipeline Successfully Finished in $(t_elapsed) s")
     println(" Outputs written to: $(opts.output_dir)/")
     if !isnothing(sim_res)
-        println(" Ocean output (GeoData store): $(sim_res.output_path)")
+        println(" Ocean output (Tethys store): $(sim_res.output_path)")
     end
     println("=================================================================")
 
@@ -1631,31 +1673,31 @@ end
 """
     run_segment_tracking(args...; kwargs...)
 
-Owned by the LARVAL half (`GeoLarvalTracking`). Run it from `GeoLarvalTrackingRun.jl`
-against the store this package writes. `GeoOceanModel` ends at the handover; calling this
+Owned by the LARVAL half (`TethysDrift`). Run it from `TethysDriftRun.jl`
+against the store this package writes. `TethysFlow` ends at the handover; calling this
 here would be one entry point doing two halves' work.
 """
 run_segment_tracking(args...; kwargs...) = error(
-    "`run_segment_tracking` is owned by GeoLarvalTracking, not by this package: run it " *
-    "from `GeoLarvalTrackingRun.jl` against the store this one wrote.")
+    "`run_segment_tracking` is owned by TethysDrift, not by this package: run it " *
+    "from `TethysDriftRun.jl` against the store this one wrote.")
 
 """
     run_segment_metrics(args...; kwargs...)
 
-Owned by the LARVAL half (`GeoLarvalTracking`). See `run_segment_tracking`.
+Owned by the LARVAL half (`TethysDrift`). See `run_segment_tracking`.
 """
 run_segment_metrics(args...; kwargs...) = error(
-    "`run_segment_metrics` is owned by GeoLarvalTracking, not by this package: run it " *
-    "from `GeoLarvalTrackingRun.jl` against the store this one wrote.")
+    "`run_segment_metrics` is owned by TethysDrift, not by this package: run it " *
+    "from `TethysDriftRun.jl` against the store this one wrote.")
 
 """
     run_segment_visualize(args...; kwargs...)
 
-Owned by the LARVAL half (`GeoLarvalTracking`). See `run_segment_tracking`.
+Owned by the LARVAL half (`TethysDrift`). See `run_segment_tracking`.
 """
 run_segment_visualize(args...; kwargs...) = error(
-    "`run_segment_visualize` is owned by GeoLarvalTracking, not by this package: run it " *
-    "from `GeoLarvalTrackingRun.jl` against the store this one wrote.")
+    "`run_segment_visualize` is owned by TethysDrift, not by this package: run it " *
+    "from `TethysDriftRun.jl` against the store this one wrote.")
 
 """
     _sanitize_tracers!(model) -> Int

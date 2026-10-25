@@ -17,7 +17,7 @@ using TOML
 """
     load_configuration(config_path::AbstractString = find_default_config_path()) -> Dict{String, Any}
 
-Read and parse a centralized `ParticleTracking.toml` file into a nested Julia Dictionary.
+Read and parse a centralized `TethysFlow.toml` file into a nested Julia Dictionary.
 A missing or unparseable file is an error, not a silent fall back to defaults.
 
 # Inputs
@@ -48,7 +48,7 @@ end
 """
     save_configuration(
         config_dict::AbstractDict,
-        config_path::AbstractString = "ParticleTracking.toml"
+        config_path::AbstractString = "TethysFlow.toml"
     ) -> String
 
 Serialize a nested configuration dictionary to a centralized `.toml` file in TOML format.
@@ -62,7 +62,7 @@ Serialize a nested configuration dictionary to a centralized `.toml` file in TOM
 """
 function save_configuration(
     config_dict::AbstractDict,
-    config_path::AbstractString = "ParticleTracking.toml"
+    config_path::AbstractString = "TethysFlow.toml"
 )::String
     out_dir = dirname(abspath(config_path))
     if !isdir(out_dir)

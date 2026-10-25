@@ -1,8 +1,8 @@
 using Pkg
-Pkg.activate("C:/Users/Nathalie/projects/GeoOceanModel")
+Pkg.activate(@__DIR__)
 
-using GeoOceanModel
-using GeoData
+using TethysFlow
+using Tethys
 using GeoDataSources
 using CairoMakie
 using Statistics
@@ -17,7 +17,7 @@ import CairoMakie: record
 #
 #    variable : temperature | salinity | u | v | w | speed   (default: temperature)
 #    depth    : metres below the surface (50, -50) or "surface" (default: surface)
-#    store    : path to the GeoData store                     (default: the Scotian Shelf store)
+#    store    : path to the Tethys store                     (default: the Scotian Shelf store)
 #
 #  The depth is a depth in metres, not a level number. The store's depth axis runs
 #  deepest first -- level 1 is the deepest layer -- so a level number would mean
@@ -25,7 +25,17 @@ import CairoMakie: record
 #  whichever end of the axis it sits on.
 # =============================================================================
 
-const DEFAULT_STORE = "C:/Users/Nathalie/projects/lakehouse/GeoOceanModel/scotian_shelf/hydrodynamics.zarr"
+function _default_hydrodynamics_store()
+    candidate = Tethys.lakehouse_dir("TethysFlow", "scotian_shelf", "hydrodynamics.zarr")
+    if isdir(candidate)
+        return candidate
+    end
+    # Proximity fallback
+    alt = normpath(joinpath(@__DIR__, "..", "lakehouse", "TethysFlow", "scotian_shelf", "hydrodynamics.zarr"))
+    return isdir(alt) ? alt : candidate
+end
+
+const DEFAULT_STORE = _default_hydrodynamics_store()
 
 const SUPPORTED_VARIABLES = (:temperature, :salinity, :u, :v, :w, :speed, :flow)
 
@@ -60,7 +70,7 @@ function usage()
 
       variable      : $(join(SUPPORTED_VARIABLES, " | "))   (default: temperature)
       depth         : metres below the surface (50, -50), "surface", or "bottom"   (default: surface)
-      store         : path to the GeoData store   (default: $(DEFAULT_STORE))
+      store         : path to the Tethys store   (default: $(DEFAULT_STORE))
       days_per_frame: days between animation frames   (default: $TIME_INTERVAL_DAYS)
 
       Flags: --bottom, --interval-days=N, --variable=..., --store=..., --depth=...
@@ -126,7 +136,7 @@ Extract the bottom-most value of a 3D field, cell by cell, rather than at one
 uniform depth level.
 
 When the store carries bathymetry, the deepest wet level is the first level whose
-depth is at or above the seabed. When bathymetry is absent (as in some GeoData
+depth is at or above the seabed. When bathymetry is absent (as in some Tethys
 stores), the deepest level holding a finite (non-NaN) value is used instead --
 levels below the seabed hold no real water and must not be mistaken for the bottom.
 """
@@ -180,8 +190,6 @@ function _bottom_level_by_field(arr3d::AbstractArray{<:Real,3}, i::Int, j::Int, 
     end
     return nothing
 end
-    return out
-end
 
 """
     _load_coastline(store) -> Vector{NamedTuple}
@@ -199,7 +207,7 @@ function _load_coastline(store::AbstractString)
     for c in candidates
         isfile(c) || continue
         endswith(c, ".parquet") || continue
-        rings = GeoData.load_coastline_polygons(c)
+        rings = Tethys.load_coastline_polygons(c)
         isempty(rings) || return rings
     end
     return GeoDataSources.SCOTIAN_SHELF_COASTLINE
@@ -305,7 +313,7 @@ function main()
     field, factor, var_label = VARIABLE_SPEC[variable]
 
     println("="^60)
-    println("GeoOceanModel — Hydrodynamic Animation Generator")
+    println("TethysFlow — Hydrodynamic Animation Generator")
     println("="^60)
     println("Store:      $store")
     println("Variable:   $variable")
@@ -324,12 +332,42 @@ function main()
     n_times = 0
     times_all = Float64[]
     try
-        probe = GeoData.geoload(store; backend = :zarr)
+        probe = Tethys.geoload(store; backend = :zarr)
         if haskey(probe.dims, :time)
             n_times = probe.dims[:time].size
         end
         if hasproperty(probe, :coords) && haskey(probe.coords, :time)
             times_all = collect(Float64, probe.coords[:time].data)
+        end
+
+        # When a model run is actively writing into a pre-allocated Zarr store,
+        # unwritten future chunks are missing on disk. Discover the latest written chunk
+        # from the primary variable subdirectories (e.g. "T" or "u").
+        chunk_cap = typemax(Int)
+        for var_sub in ("T", "u", "v", "S")
+            var_dir = joinpath(store, var_sub)
+            if isdir(var_dir)
+                c_indices = Int[]
+                for fn in readdir(var_dir)
+                    m = match(r"^(\d+)\.0\.0\.0$", fn)
+                    m !== nothing && push!(c_indices, parse(Int, m.captures[1]))
+                end
+                if !isempty(c_indices)
+                    sort!(c_indices)
+                    # Discard the very last chunk if it might be incomplete / in progress
+                    latest_valid_chunk = length(c_indices) > 1 ? c_indices[end - 1] : c_indices[end]
+                    # Chunk size along time dimension is 24
+                    steps_available = (latest_valid_chunk + 1) * 24
+                    chunk_cap = min(chunk_cap, steps_available)
+                end
+            end
+        end
+        if chunk_cap < typemax(Int) && chunk_cap < n_times
+            println("Active store detected: limiting time steps to written chunks ($chunk_cap / $n_times)")
+            n_times = chunk_cap
+            if length(times_all) > n_times
+                times_all = times_all[1:n_times]
+            end
         end
     catch err
         println("Could not read the store's time axis: $(sprint(showerror, err))")
@@ -342,7 +380,7 @@ function main()
     println("Found $n_times time steps in store")
 
     # --- Get grid dimensions from first time step ---
-    ds_first = GeoOceanModel.extract_hydrodynamic_dataset(store; time_index = 1, depth = depth)
+    ds_first = TethysFlow.extract_hydrodynamic_dataset(store; time_index = 1, depth = depth)
     lons = ds_first.lons
     lats = ds_first.lats
     depths = ds_first.depths
@@ -392,7 +430,7 @@ function main()
     # all come out of that one read. Reading it twice per frame -- once for the field
     # and once for the arrows -- doubled the cost of every animation for nothing.
     function get_slice(i::Int)
-        return GeoOceanModel.extract_hydrodynamic_dataset(store; time_index = i, depth_level = k)
+        return TethysFlow.extract_hydrodynamic_dataset(store; time_index = i, depth_level = k)
     end
 
     # The field at the resolved level, in display units.
@@ -413,14 +451,19 @@ function main()
         return Float64.(ds[Symbol(field)][:, :, k]) * factor
     end
 
-    # --- Get first frame data for color range ---
-    first_var = field_of(get_slice(first(frame_indices)))
-    finite_first = filter(isfinite, first_var)
-    cmin, cmax = if !isempty(finite_first)
-        cmin0, cmax0 = minimum(finite_first), maximum(finite_first)
+    # --- Get sample frame data for color range ---
+    # In Oceananigans and hydrodynamic stores, land points outside the wet domain
+    # often hold 0.0 or NaN. Sample the latest frame (or first) for non-zero wet values.
+    sample_var = field_of(get_slice(last(frame_indices)))
+    finite_wet = filter(x -> isfinite(x) && x != 0.0, sample_var)
+    if isempty(finite_wet)
+        finite_wet = filter(isfinite, sample_var)
+    end
+    cmin, cmax = if !isempty(finite_wet)
+        cmin0, cmax0 = minimum(finite_wet), maximum(finite_wet)
         cspan = cmax0 - cmin0
         if cspan > 0
-            (cmin0 - 0.05 * cspan, cmax0 + 0.05 * cspan)
+            (cmin0 - 0.02 * cspan, cmax0 + 0.02 * cspan)
         else
             (cmin0 - 1.0, cmax0 + 1.0)
         end
@@ -529,6 +572,7 @@ function main()
             (isfinite(sx) && isfinite(sy)) || continue
             sp_px_max = max(sp_px_max, hypot(sx, sy))
         end
+        arrow_dirs = Observable(fill(Vec2f(0.0, 0.0), length(arrow_pts)))
         arrow_scale_note = "arrows: longest = $(round(sp_max, digits=1)) cm/s " *
                            "($(ARROW_PIXELS) px)"
         if isdefined(Makie, :arrows2d!)
@@ -537,8 +581,8 @@ function main()
                       tipcolor = :white, shaftcolor = :white)
         else
             arrows!(ax, arrow_pts, arrow_dirs;
-                    tipwidth = 6, tiplength = 10, lengthscale = 1.0,
-                    tipcolor = :white, shaftcolor = :white)
+                      tipwidth = 6, tiplength = 10, lengthscale = 1.0,
+                      tipcolor = :white, shaftcolor = :white)
         end
     end
 

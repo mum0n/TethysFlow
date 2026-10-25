@@ -1,10 +1,11 @@
 # ==============================================================================
-# GeoOceanModel Test: Lateral Sponge Relaxation
+# TethysFlow Test: Lateral Sponge Relaxation
 # ==============================================================================
 
 using Test
 using Oceananigans
-using GeoOceanModel
+using TethysFlow
+const TethysFlow = TethysFlow
 
 @testset "Sponge Relaxation" begin
     @testset "CartesianSpongeMask bitstype & weights" begin

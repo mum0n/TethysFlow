@@ -1,10 +1,10 @@
-# GeoOceanModel
+# TethysFlow
 
-A regional ocean hydrodynamic model that transforms geospatial environmental configurations into realized three-dimensional ocean circulation fields, persisting results directly into the GeoData layer as self-contained Zarr stores.
+A regional ocean hydrodynamic model that transforms geospatial environmental configurations into realized three-dimensional ocean circulation fields, persisting results directly into the Tethys layer as self-contained Zarr stores.
 
 ## Architectural Overview
 
-`GeoOceanModelRun.jl` orchestrates modular execution segments implemented in [`src/driver.jl`](file:///c:/home/jae/projects/GeoOceanModel/src/driver.jl):
+`TethysFlowRun.jl` orchestrates modular execution segments implemented in [`src/driver.jl`](file:///c:/home/jae/projects/TethysFlow/src/driver.jl):
 
 - **Data Ingestion (`--data`)**: Assimilates high-resolution bathymetric soundings, coastline polygons, surface winds, and open-boundary hydrography via [`GeoDataSources`](file:///c:/home/jae/projects/GeoDataSources/README.md).
 - **Grid & Immersed Boundary (`--grid`)**: Constructs spherical latitude-longitude grids on CPU or GPU (CUDA), fitting real seafloor topography as immersed boundaries.
@@ -14,16 +14,16 @@ A regional ocean hydrodynamic model that transforms geospatial environmental con
 ## Running
 
 ```bash
-julia --project=. GeoOceanModelRun.jl --all                       # configs/default.toml
-julia --project=. GeoOceanModelRun.jl --all --config=scotian_shelf
-julia --project=. GeoOceanModelRun.jl --grid --config=scotian_shelf
+julia --project=. TethysFlowRun.jl --all                       # configs/default.toml
+julia --project=. TethysFlowRun.jl --all --config=scotian_shelf
+julia --project=. TethysFlowRun.jl --grid --config=scotian_shelf
 ```
 
 Segment flags (`--data`, `--grid`, `--model`, `--sim`, `--all`) execute a designated stage and its prerequisites.
 
 ## Grid Architecture & Coordinate Systems
 
-Computational grids are constructed via [`build_shelf_grid`](file:///c:/home/jae/projects/GeoOceanModel/src/data/grid_bathymetry.jl#L22) as a single coordinate topology:
+Computational grids are constructed via [`build_shelf_grid`](file:///c:/home/jae/projects/TethysFlow/src/data/grid_bathymetry.jl#L22) as a single coordinate topology:
 
 - **Standard Geographic Grid**:
   - *Conceptual Overview*: A conventional rectangular box aligned north-south and east-west along lines of latitude and longitude. Ideal for localized domains (e.g. Cape Breton demonstration) where the coast is relatively straight or aligned with cardinal directions.
@@ -44,7 +44,7 @@ Regional ocean models simulate a localized section of the ocean rather than the 
 
 To achieve this, the model applies a peripheral buffer zone known as a sponge layer (Price & Aumont 2011). Inside this sponge band, prognostic variables are nudged toward external boundary states with a damping weight $\gamma$ that increases quadratically from $\gamma = 0$ in the interior to $\gamma = 1$ at the boundary.
 
-On a geographic grid aligned with lines of latitude and longitude, the sponge band is specified with simple bounding coordinates (`lat_min`, `lat_max`, `lon_min`, `lon_max`). [`CartesianSpongeMask`](file:///c:/home/jae/projects/GeoOceanModel/src/model/hydrodynamic_model.jl) evaluates the quadratic damping function in those coordinates, which is exactly the grid the model runs on.
+On a geographic grid aligned with lines of latitude and longitude, the sponge band is specified with simple bounding coordinates (`lat_min`, `lat_max`, `lon_min`, `lon_max`). [`CartesianSpongeMask`](file:///c:/home/jae/projects/TethysFlow/src/model/hydrodynamic_model.jl) evaluates the quadratic damping function in those coordinates, which is exactly the grid the model runs on.
 
 ### Mathematical Formulation & Numerical Implementation (Specialists)
 
@@ -113,7 +113,7 @@ rather than by reading the API:
 
 #### GPU Device Kernel Lowering
 
-Passing closures that capture heap-allocated objects or variables of abstract type prevents CUDA LLVM IR generation. [`CartesianSpongeMask`](file:///c:/home/jae/projects/GeoOceanModel/src/model/hydrodynamic_model.jl) is declared as a concrete, immutable `isbits` struct. With `Adapt.adapt_structure(to, s) = s`, the functor lowers into device registers and executes inline without GPU scalar indexing or memory allocation.
+Passing closures that capture heap-allocated objects or variables of abstract type prevents CUDA LLVM IR generation. [`CartesianSpongeMask`](file:///c:/home/jae/projects/TethysFlow/src/model/hydrodynamic_model.jl) is declared as a concrete, immutable `isbits` struct. With `Adapt.adapt_structure(to, s) = s`, the functor lowers into device registers and executes inline without GPU scalar indexing or memory allocation.
 
 What a relaxation target may be, on the GPU, and why:
 
@@ -148,7 +148,7 @@ $2\,\text{km}$ grid spacing, the barotropic Courant number of the split-explicit
 
 $$\text{CFL}_{\text{wave}} = \frac{c \, (\Delta t / N_{\text{sub}})}{\Delta x} \approx 0.000695 \, \Delta t$$
 
-Oceananigans employs a split-explicit free-surface solver ([`SplitExplicitFreeSurface`](file:///c:/home/jae/projects/GeoOceanModel/src/model/hydrodynamic_model.jl)) where the 2D barotropic equations are integrated over $N_{\text{sub}} = 45$ substeps per baroclinic time step $\Delta t$. The substep count is fixed rather than derived from a CFL, so the Courant number above is what the time step has to keep small. The adaptive step controller enforces this: when
+Oceananigans employs a split-explicit free-surface solver ([`SplitExplicitFreeSurface`](file:///c:/home/jae/projects/TethysFlow/src/model/hydrodynamic_model.jl)) where the 2D barotropic equations are integrated over $N_{\text{sub}} = 45$ substeps per baroclinic time step $\Delta t$. The substep count is fixed rather than derived from a CFL, so the Courant number above is what the time step has to keep small. The adaptive step controller enforces this: when
 $\text{CFL}_{\text{wave}} > 0.5$ it caps $\Delta t$ at $0.5 \cdot 45 \cdot \Delta x / c$, which at
 $2\,\text{km}$ and $400\,\text{m}$ is $467\,\text{s}$. The practical ceiling is therefore the
 configured `max_dt_seconds`, and $240\,\text{s}$ gives a wave Courant number of $0.167$ —
@@ -176,29 +176,29 @@ Past configurations mixed positive and negative numbers (e.g. `inshore_depth = -
 
 ### Defensive Backward Compatibility
 
-In [`src/config/conversion.jl`](file:///c:/home/jae/projects/GeoOceanModel/src/config/conversion.jl) and [`HydrodynamicOptions`](file:///c:/home/jae/projects/GeoOceanModel/src/config/options.jl#L110), depth inputs are normalized defensively via `abs(Float64(...))`. In [`src/driver.jl`](file:///c:/home/jae/projects/GeoOceanModel/src/driver.jl#L408), the vertical break elevation evaluates $z_{\text{break}} = -\operatorname{abs}(D_{\text{break}})$, ensuring consistent execution regardless of input sign convention.
+In [`src/config/conversion.jl`](file:///c:/home/jae/projects/TethysFlow/src/config/conversion.jl) and [`HydrodynamicOptions`](file:///c:/home/jae/projects/TethysFlow/src/config/options.jl#L110), depth inputs are normalized defensively via `abs(Float64(...))`. In [`src/driver.jl`](file:///c:/home/jae/projects/TethysFlow/src/driver.jl#L408), the vertical break elevation evaluates $z_{\text{break}} = -\operatorname{abs}(D_{\text{break}})$, ensuring consistent execution regardless of input sign convention.
 
 ## Topography & Immersed Boundaries
 
-Seafloor topography is ingested from high-resolution bathymetric soundings and mapped to the computational grid via [`build_immersed_grid_from_real_data`](file:///c:/home/jae/projects/GeoOceanModel/src/data/grid_bathymetry.jl#L484):
+Seafloor topography is ingested from high-resolution bathymetric soundings and mapped to the computational grid via [`build_immersed_grid_from_real_data`](file:///c:/home/jae/projects/TethysFlow/src/data/grid_bathymetry.jl#L484):
 
 - **Bilinear Regridding**: Cell centres lie on a longitude-latitude lattice, so topography is interpolated with a bilinear (`regrid_2d_field`) remap onto the grid's interior centres, evaluated on CPU before GPU array transfer.
 - **Topographic Smoothing & Floors**: Bathymetry is clamped by minimum water depth $H_{\min} = \text{inshore\_depth}$ ($20.0\,\text{m}$) and maximum depth $H_{\max}$ ($1,500\,\text{m}$ or domain depth). Bounding maximum depth constrains the maximum barotropic gravity wave speed $c = \sqrt{g H_{\max}} \le 121\,\text{m/s}$, ensuring stable split-explicit free-surface subcycling.
 - **Hypertidal Masking**: Optional masking of the upper Bay of Fundy (`mask_bay_of_fundy = true`) sets hypertidal shallows to solid land, dampening non-linear tidal resonance and spurious vertical velocity spikes ($> 1\,\text{m/s}$) outside snow crab habitat.
 
-### Tide Handling: GeoOceanModel vs GeoLarvalTracking
+### Tide Handling: TethysFlow vs TethysDrift
 
-Tides are applied in GeoOceanModel via TPXO9 boundary forcing (placement = `:boundary`), which relaxes
+Tides are applied in TethysFlow via TPXO9 boundary forcing (placement = `:boundary`), which relaxes
 toward TPXO9 tidal velocity at the open boundaries only. The barotropic tidal wave then propagates
 inward dynamically through the shallow-water equations. This avoids the resonance that a uniform
 analytic body forcing caused (8–13 m/s divergence within 6 hours).
 
-Because GeoOceanModel's stored flow field now carries the real tidal cycle, **GeoLarvalTracking must NOT
+Because TethysFlow's stored flow field now carries the real tidal cycle, **TethysDrift must NOT
 superpose analytic tidal velocity on top** — that would double-count tide. The `[tides]` section in
-GeoLarvalTracking TOML configs should have `enable_tides = false` when the ocean model already carries
-tide from GeoOceanModel.
+TethysDrift TOML configs should have `enable_tides = false` when the ocean model already carries
+tide from TethysFlow.
 
-The `[tides]` section in GeoOceanModel TOML configs controls:
+The `[tides]` section in TethysFlow TOML configs controls:
 - `enable_tides`: Whether TPXO9 tidal boundary forcing is active
 - `tides_source`: "tpxo9" for TPXO9 global tidal atlas
 - `tidal_placement`: ":boundary" (edge-only relaxation, the physical default)
@@ -207,25 +207,25 @@ The `[tides]` section in GeoOceanModel TOML configs controls:
 
 ## Configuration Profiles
 
-Configuration files are consolidated in [`configs/`](file:///c:/home/jae/projects/GeoOceanModel/configs):
+Configuration files are consolidated in [`configs/`](file:///c:/home/jae/projects/TethysFlow/configs):
 
 | Configuration | Grid Type | Resolution / Size | Primary Data Sources | Purpose |
 |---|---|---|---|---|
-| [`scotian_shelf.toml`](file:///c:/home/jae/projects/GeoOceanModel/configs/scotian_shelf.toml) | Standard | $400 \times 120 \times 16$ ($400\,\text{m}$ floor) | NWA soundings, GLORYS12V1, ERA5 | Snow Crab production run along the Scotian Shelf margin |
-| [`default.toml`](file:///c:/home/jae/projects/GeoOceanModel/configs/default.toml) | Standard | $32 \times 38 \times 8$ ($1500\,\text{m}$ floor) | ETOPO2022, WOA23, Open-Meteo | Lightweight keyless Cape Breton demonstration |
+| [`scotian_shelf.toml`](file:///c:/home/jae/projects/TethysFlow/configs/scotian_shelf.toml) | Standard | $400 \times 120 \times 16$ ($400\,\text{m}$ floor) | NWA soundings, GLORYS12V1, ERA5 | Snow Crab production run along the Scotian Shelf margin |
+| [`default.toml`](file:///c:/home/jae/projects/TethysFlow/configs/default.toml) | Standard | $32 \times 38 \times 8$ ($1500\,\text{m}$ floor) | ETOPO2022, WOA23, Open-Meteo | Lightweight keyless Cape Breton demonstration |
 
 ### Shared Lakehouse Configuration
 
-`GeoOceanModel` reads central data products from `lakehouse/GeoData/` and archives simulation stores to `lakehouse/GeoOceanModel/`. The central root is resolved via `GeoData.lakehouse_dir()` in order of precedence:
+`TethysFlow` reads central data products from `lakehouse/Tethys/` and archives simulation stores to `lakehouse/TethysFlow/`. The central root is resolved via `Tethys.lakehouse_dir()` in order of precedence:
 - Environment variables: `GEOCEAN_STORE_ROOT` or `GEODATA_LAKEHOUSE`.
-- Local project configuration: `LocalPreferences.toml` (`[GeoData] lakehouse_dir`).
+- Local project configuration: `LocalPreferences.toml` (`[Tethys] lakehouse_dir`).
 - User configuration: `~/.geodata/storage.toml` (`[storage] store_root`).
-- Proximity fallback: Relative path `../lakehouse/GeoOceanModel`.
+- Proximity fallback: Relative path `../lakehouse/TethysFlow`.
 
 Persistent lakehouse path configuration:
 ```julia
-using GeoData
-GeoData.set_lakehouse_dir!("/path/to/shared/lakehouse")
+using Tethys
+Tethys.set_lakehouse_dir!("/path/to/shared/lakehouse")
 ```
 
 ## Output & Data Handover
@@ -237,9 +237,9 @@ Simulations produce a directory-based Zarr archive `hydrodynamics.zarr`:
 
 ## Interactive Notebooks
 
-Pluto interactive documentation and inspection notebooks are located in [`notebooks/`](file:///c:/home/jae/projects/GeoOceanModel/notebooks):
-- [`notebooks/scotian_shelf.jl`](file:///c:/home/jae/projects/GeoOceanModel/notebooks/scotian_shelf.jl): Production domain, bathymetric filtering, and full hydrodynamics.
-- [`notebooks/default.jl`](file:///c:/home/jae/projects/GeoOceanModel/notebooks/default.jl): Keyless demonstration domain.
+Pluto interactive documentation and inspection notebooks are located in [`notebooks/`](file:///c:/home/jae/projects/TethysFlow/notebooks):
+- [`notebooks/scotian_shelf.jl`](file:///c:/home/jae/projects/TethysFlow/notebooks/scotian_shelf.jl): Production domain, bathymetric filtering, and full hydrodynamics.
+- [`notebooks/default.jl`](file:///c:/home/jae/projects/TethysFlow/notebooks/default.jl): Keyless demonstration domain.
 
 Run notebooks via:
 ```bash

@@ -1,6 +1,7 @@
 using Test
-using GeoOceanModel
-using GeoData
+using TethysFlow
+const TethysFlow = TethysFlow
+using Tethys
 using Oceananigans
 
 const OCEAN_TMP = joinpath(@__DIR__, "outputs", "_test_geoceanmodel")
@@ -15,17 +16,17 @@ const OCEAN_TMP = joinpath(@__DIR__, "outputs", "_test_geoceanmodel")
     local model = Oceananigans.HydrostaticFreeSurfaceModel(mk; tracers = (:T,))
     set!(model, T = 13.5)
 
-    local store = GeoOceanModel.attach_output_callback!(
+    local store = TethysFlow.attach_output_callback!(
         Oceananigans.Simulation(model; Δt = 1.0, stop_time = 2.0), OCEAN_TMP;
         fields = ("u", "T"))
-    @test store == GeoOceanModel.output_zarr_path(OCEAN_TMP)
+    @test store == TethysFlow.output_zarr_path(OCEAN_TMP)
 
     local sim = Oceananigans.Simulation(model; Δt = 1.0, stop_time = 2.0)
-    GeoOceanModel.attach_output_callback!(sim, OCEAN_TMP; fields = ("u", "T"))
+    TethysFlow.attach_output_callback!(sim, OCEAN_TMP; fields = ("u", "T"))
     Oceananigans.run!(sim)
     @test isdir(store)
 
-    local ds = GeoData.geoload(store; backend = :zarr)
+    local ds = Tethys.load_dataset(store; backend = :zarr)
     @test "T" in keys(ds.variables) && "u" in keys(ds.variables)
     @test length(ds.dims[:lon].coords) == 4
     @test length(ds.dims[:lat].coords) == 4
@@ -44,10 +45,10 @@ const OCEAN_TMP = joinpath(@__DIR__, "outputs", "_test_geoceanmodel")
         local model_r = Oceananigans.HydrostaticFreeSurfaceModel(mk_r; tracers = (:T,))
         set!(model_r, T = value)
         local sim_r = Oceananigans.Simulation(model_r; Δt = 1.0, stop_time = 1.0)
-        GeoOceanModel.attach_output_callback!(sim_r, d; fields = ("T",))
+        TethysFlow.attach_output_callback!(sim_r, d; fields = ("T",))
         Oceananigans.run!(sim_r)
-        return sum(length(GeoData.geoload(
-            GeoOceanModel.output_zarr_path(d); backend = :zarr).coords[:time].data))
+        return sum(length(Tethys.load_dataset(
+            TethysFlow.output_zarr_path(d); backend = :zarr).coords[:time].data))
     end
     local first_n = one_run(10.0)
     @test first_n > 0

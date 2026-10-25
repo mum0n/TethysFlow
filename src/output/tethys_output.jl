@@ -1,11 +1,11 @@
 # ==============================================================================
-#  geodata_output.jl -- the simulated output as a GeoData store
+#  geodata_output.jl -- the simulated output as a Tethys store
 # ==============================================================================
 #
 #  Why this exists. A run's output used to reach the larval half as a JLD2 archive plus a
 #  sidecar file, and the reader had to know Oceananigans' storage layout to interpret it
 #  (halos, C-grids, which variable lives on which face). That coupling is removed here: the
-#  ocean half writes its output straight into a GeoData-native store, and the larval half
+#  ocean half writes its output straight into a Tethys-native store, and the larval half
 #  opens it through the data layer rather than through Oceananigans.
 #
 #  What is stored, and how:
@@ -53,10 +53,10 @@ An Oceananigans `Callback` that writes the ocean state into a store at each firi
 One store per run, appended to at each interval, so a long simulation writes incrementally
 rather than holding its history in memory and losing it on a crash.
 
-That store is a **GeoData** store -- the variables are a `GeoDataset`'s, with their axes and
+That store is a **Tethys** store -- the variables are a `GeoDataset`'s, with their axes and
 dimension records, opened once at the first output and written into slice by slice. This is
 what makes a reader use `geoload` and the dataset's own `.variables`/`.dims` rather than
-walking Zarr: an earlier version wrote each interval to `T/<m>/`, and GeoData's Zarr reader
+walking Zarr: an earlier version wrote each interval to `T/<m>/`, and Tethys's Zarr reader
 discovers variables as the root group's *child arrays*, so that store opened as an empty
 dataset and every consumer -- the larval half and the figures -- hand-rolled its own reads.
 
@@ -115,7 +115,7 @@ function GeodataOutputCallback(output_dir::AbstractString, interval::Real,
 
     start = 1
     if resume
-        start = GeoOceanModel.store_interval_count(store) + 1
+        start = TethysFlow.store_interval_count(store) + 1
     end
     return GeodataOutputCallback(store, output_dir, collect(String.(fields)), Ref(start),
                                  nothing, nothing, Float64(interval), Float64(spinup_seconds),
@@ -163,31 +163,56 @@ a reader that went looking for it found nothing.
 """
 function _build_store_dataset(store::AbstractString, ax, names::Vector{String}, nt::Int,
                               model)
-    crs = GeoData.CoordinateSystem(crs = "EPSG:4326")
+    is_planar_grid = false
+    if model !== nothing && hasproperty(model, :grid)
+        base = hasproperty(model.grid, :underlying_grid) ? model.grid.underlying_grid : model.grid
+        is_planar_grid = base isa Oceananigans.Grids.RectilinearGrid
+    end
+
+    crs_str = is_planar_grid ? "Projected" : "EPSG:4326"
+    crs = Tethys.CoordinateSystem(crs = crs_str)
     nx, ny, nz = length(ax.x), length(ax.y), length(ax.z)
 
-    axe(name, coords, units, std, dim_type) = GeoData.Dimension(
+    axe(name, coords, units, std, dim_type) = Tethys.Dimension(
         name = name, size = length(coords), coords = coords,
         units = units, standard_name = std, dim_type = dim_type)
 
-    dl = axe(:lon, ax.x, "degrees_east", "longitude", GeoData.DIM_SPATIAL)
-    dt = axe(:lat, ax.y, "degrees_north", "latitude", GeoData.DIM_SPATIAL)
-    dz = axe(:depth, ax.z, "m", "depth", GeoData.DIM_PARAMETRIC)
-    tim = axe(:time, Float64.(1:nt), "s", "time", GeoData.DIM_TEMPORAL)
+    dl = if is_planar_grid
+        axe(:x, ax.x, "m", "projection_x_coordinate", Tethys.DIM_SPATIAL)
+    else
+        axe(:lon, ax.x, "degrees_east", "longitude", Tethys.DIM_SPATIAL)
+    end
+    dt = if is_planar_grid
+        axe(:y, ax.y, "m", "projection_y_coordinate", Tethys.DIM_SPATIAL)
+    else
+        axe(:lat, ax.y, "degrees_north", "latitude", Tethys.DIM_SPATIAL)
+    end
+    dz = axe(:depth, ax.z, "m", "depth", Tethys.DIM_PARAMETRIC)
+    tim = axe(:time, Float64.(1:nt), "s", "time", Tethys.DIM_TEMPORAL)
 
-    dims = Dict{Symbol, GeoData.Dimension}(:lon => dl, :lat => dt, :depth => dz, :time => tim)
+    dims = if is_planar_grid
+        Dict{Symbol, Tethys.Dimension}(:x => dl, :y => dt, :depth => dz, :time => tim)
+    else
+        Dict{Symbol, Tethys.Dimension}(:lon => dl, :lat => dt, :depth => dz, :time => tim)
+    end
 
-    # Align Zarr chunk sizes (nx, ny, nz, min(nt, 24)) to minimize metadata overhead and
-    # allow fast streaming chunks.
+    dim_names = is_planar_grid ? ["x", "y", "depth", "time"] : ["lon", "lat", "depth", "time"]
+
     chunk_t = min(nt, 24)
     target_chunks = (nx, ny, nz, chunk_t)
 
-    variables = [(name, (nx, ny, nz, nt), ["lon", "lat", "depth", "time"], target_chunks)
+    variables = [(name, (nx, ny, nz, nt), dim_names, target_chunks)
                  for name in names]
 
-    GeoData.create_zarr_template(String(store);
+    attrs = run_metadata(model)
+    if is_planar_grid
+        attrs["grid_type"] = "planar_rectilinear"
+        attrs["grid_units"] = "m"
+    end
+
+    Tethys.create_zarr_template(String(store);
                                  dims = dims,
-                                 attrs = run_metadata(model),
+                                 attrs = attrs,
                                  variables = variables)
 
     # Reopened for write, because the callback writes into this dataset's arrays:
@@ -195,7 +220,7 @@ function _build_store_dataset(store::AbstractString, ax, names::Vector{String}, 
     # writeable array here. It does not truncate -- a second `"w"` open appends, which is
     # checked explicitly, because a writer that silently cleared its earlier intervals
     # would produce a run whose first slice is missing.
-    return GeoData.geoload(String(store); backend = :zarr, mode = "w")
+    return Tethys.geoload(String(store); backend = :zarr, mode = "w")
 end
 
 """
@@ -334,9 +359,9 @@ function (cb::GeodataOutputCallback)(sim::Oceananigans.Simulation)
 
     ds = cb.store_ds
     if isnothing(ds)
-        # First interval: the store is created as a GeoData store, with the time axis sized to
-        # the run. Written through GeoData because a store written by hand -- one directory
-        # per interval -- is one GeoData's `geoload` cannot open: its reader discovers
+        # First interval: the store is created as a Tethys store, with the time axis sized to
+        # the run. Written through Tethys because a store written by hand -- one directory
+        # per interval -- is one Tethys's `geoload` cannot open: its reader discovers
         # variables as the root group's *child arrays*, so that store opens as an empty dataset
         # and every consumer -- the larval half and the figures -- then hand-rolls its own
         # Zarr walk. That is exactly what they were doing.
@@ -346,10 +371,10 @@ function (cb::GeodataOutputCallback)(sim::Oceananigans.Simulation)
         old_fields = nothing
         old_nt = 0
         if ispath(st)
-            old_ds = GeoData.geoload(st; backend = :zarr)
+            old_ds = Tethys.geoload(st; backend = :zarr)
             old_nt = size(old_ds.variables[cb.field_names[1]].data, 4)
             if old_nt >= nt
-                ds = GeoData.geoload(st; backend = :zarr, mode = "w")
+                ds = Tethys.geoload(st; backend = :zarr, mode = "w")
                 cb.store_ds = ds
             else
                 old_time = copy(old_ds.coords[:time].data)
@@ -372,7 +397,7 @@ function (cb::GeodataOutputCallback)(sim::Oceananigans.Simulation)
     end
     if isnothing(cb.time_array)
         # The store's own time array, opened once. See the note where it is written: this is
-        # the coordinate GeoData's reader materialises, so it is written at the backend.
+        # the coordinate Tethys's reader materialises, so it is written at the backend.
         #
         # The array is taken from the opened group itself. Re-wrapping it -- `Zarr.ZArray(a)`
         # -- gives an array that reports `writeable = true` and silently writes to nothing:
@@ -394,9 +419,9 @@ function (cb::GeodataOutputCallback)(sim::Oceananigans.Simulation)
         ds.variables[name].data[:, :, :, m] = arr
     end
     # The time coordinate goes through the store's own array, not through `ds.coords[:time]`:
-    # GeoData's Zarr reader materialises a coordinate into a plain host `Vector` when it opens
+    # Tethys's Zarr reader materialises a coordinate into a plain host `Vector` when it opens
     # a store, so writing there would update memory the next read never sees. This is the one
-    # array GeoData's read path cannot write back, and it is a coordinate rather than science,
+    # array Tethys's read path cannot write back, and it is a coordinate rather than science,
     # so it is the one place a backend call belongs.
     cb.time_array[m] = t
     cb.written[] = m + 1
@@ -549,8 +574,8 @@ function stitch_shelf_domains(
     isdir(tile_west_path) || error("Western tile store not found: $(tile_west_path)")
     isdir(tile_east_path) || error("Eastern tile store not found: $(tile_east_path)")
 
-    ds_w = GeoData.geoload(tile_west_path; backend = :zarr)
-    ds_e = GeoData.geoload(tile_east_path; backend = :zarr)
+    ds_w = Tethys.geoload(tile_west_path; backend = :zarr)
+    ds_e = Tethys.geoload(tile_east_path; backend = :zarr)
 
     # Resolve coordinates
     lon_w = Float64.(ds_w.coords[:lon].data)

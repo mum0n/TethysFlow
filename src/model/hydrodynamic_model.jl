@@ -202,18 +202,12 @@ function build_hydrodynamic_model(
     active_boundaries = (:east, :west),
     tidal_placement::Symbol = :boundary,
     cd_drag::Real = 2.5e-3,
+    coriolis = nothing,
+    projection = nothing,
 )
     active_tracers = (enable_o2 && !(:O2 in tracers)) ? (tracers..., :O2) : tracers
 
     # Lateral relaxation sponge (Price & Aumont 2011).
-    #
-    # The sponge itself is constructed where the forcing is assembled, because it must be
-    # wrapped in a `ContinuousForcing` that declares its velocity dependency. Here we only
-    # decide whether it is requested at all, and validate that the caller supplied the
-    # study-domain bounds it will be anchored to.
-    #
-    # The TOML `[domain]` section is the single source of truth for geography; nothing about
-    # the domain is compiled into this package.
     sponge_active = lateral_boundary_relaxation || !isnothing(open_boundary_conditions)
     if sponge_active && (isnothing(lon_range) || isnothing(lat_range))
         error(
@@ -224,46 +218,47 @@ function build_hydrodynamic_model(
     end
 
     # Conversion factor from W/m^2 to kinematic heat flux (m*K/s): Q / (rho0 * cp)
-    # Using reference density rho0 = 1025.0 kg/m^3 and specific heat cp = 3991.0 J/(kg*K)
     rho0_cp = 1025.0 * 3991.0
 
     # Surface heat flux boundary condition
-    # When a temperature-dependent flux function is supplied, e.g. f(x, y, t, T),
-    # construct a FluxBoundaryCondition with `field_dependencies = :T` which evaluates
-    # dynamically on both CPU and GPU.
     T_flux_bc = if surface_heat_flux isa Function && applicable(surface_heat_flux, 0.0, 0.0, 0.0, 0.0)
         FluxBoundaryCondition(KinematicSurfaceHeatFlux(surface_heat_flux, rho0_cp), field_dependencies = :T)
     elseif surface_heat_flux isa Function
         if applicable(surface_heat_flux, 0.0, 0.0, 0.0, 0.0, 0.0)
-            # 5-arg function f(x, y, z, t, T) like HaneyRelaxedHeatFlux: declare field_dependencies
-            # so Oceananigans passes T as the 5th argument.
-            T_flux_bc = FluxBoundaryCondition(
+            FluxBoundaryCondition(
                 (x, y, z, t, T) -> -surface_heat_flux(x, y, z, t, T) / rho0_cp,
                 field_dependencies = :T,
             )
         else
-            # 3-arg function f(x, y, t): accept (x, y, z, t) without field_dependencies.
-            T_flux_bc = FluxBoundaryCondition(
+            FluxBoundaryCondition(
                 (x, y, z, t) -> -surface_heat_flux(x, y, t) / rho0_cp,
             )
         end
-        T_flux_bc
     elseif surface_heat_flux isa AbstractMatrix
         FluxBoundaryCondition(-surface_heat_flux ./ rho0_cp)
     else
         FluxBoundaryCondition(-Float64(surface_heat_flux) / rho0_cp)
     end
 
-    u_bc = surface_wind_stress_x isa BoundaryCondition ? surface_wind_stress_x :
-           FluxBoundaryCondition(surface_wind_stress_x)
-    v_bc = surface_wind_stress_y isa BoundaryCondition ? surface_wind_stress_y :
-           FluxBoundaryCondition(surface_wind_stress_y)
+    # Geographic center coordinates for local vector rotation
+    lon_c = isnothing(lon_range) ? 0.0 : 0.5 * (Float64(lon_range[1]) + Float64(lon_range[2]))
+    lat_c = isnothing(lat_range) ? 0.0 : 0.5 * (Float64(lat_range[1]) + Float64(lat_range[2]))
+
+    # Rotate surface wind stress vectors into computational grid axes when projected
+    eff_wind_x, eff_wind_y = if projection !== nothing && is_planar(projection) &&
+                                surface_wind_stress_x isa Real && surface_wind_stress_y isa Real
+        rotate_vector_to_grid(
+            projection, Float64(surface_wind_stress_x), Float64(surface_wind_stress_y), lon_c, lat_c
+        )
+    else
+        (surface_wind_stress_x, surface_wind_stress_y)
+    end
+
+    u_bc = eff_wind_x isa BoundaryCondition ? eff_wind_x : FluxBoundaryCondition(eff_wind_x)
+    v_bc = eff_wind_y isa BoundaryCondition ? eff_wind_y : FluxBoundaryCondition(eff_wind_y)
     T_bc = T_flux_bc
 
-    # Bottom drag: quadratic seabed friction via the Oceananigans `BulkDrag` boundary
-    # condition, applied to both u and v on the bottom face. It is the model's only
-    # momentum sink, and the same coefficient is what the Courant estimator protects, so
-    # the two are read from one value.
+    # Bottom drag: quadratic seabed friction via the Oceananigans `BulkDrag` boundary condition
     bottom_drag_bc = BulkDrag(coefficient = Float64(cd_drag))
 
     bcs = Dict{Symbol, Any}(
@@ -273,9 +268,20 @@ function build_hydrodynamic_model(
     :T in active_tracers && (bcs[:T] = FieldBoundaryConditions(; top = T_bc))
     user_bcs = NamedTuple{Tuple(keys(bcs))}(Tuple(bcs[k] for k in keys(bcs)))
 
-    # Extract grid bounds for sponge layer construction (needs to happen before sponge creation)
+    # Extract grid bounds for sponge layer construction
     base_g = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
-    (lon_min_grid, lon_max_grid), (lat_min_grid, lat_max_grid) = grid_geographic_bounds(base_g)
+    (lon_min_grid, lon_max_grid), (lat_min_grid, lat_max_grid) = if base_g isa Oceananigans.Grids.RectilinearGrid
+        (Float64(minimum(base_g.xᶠᵃᵃ)), Float64(maximum(base_g.xᶠᵃᵃ))),
+        (Float64(minimum(base_g.yᵃᶠᵃ)), Float64(maximum(base_g.yᵃᶠᵃ)))
+    else
+        grid_geographic_bounds(base_g; projection = projection)
+    end
+
+    eff_sponge_width = if base_g isa Oceananigans.Grids.RectilinearGrid
+        sponge_width < 10.0 ? Float64(sponge_width * 111_000.0) : Float64(sponge_width)
+    else
+        Float64(sponge_width)
+    end
 
     # The tidal velocity, as a callable the sponge can relax toward.
     u_tide_val = isnothing(tidal_forcing) ? nothing : tidal_forcing.u
@@ -323,14 +329,16 @@ function build_hydrodynamic_model(
     # total is numerically identical to the previous construction:
     #     tide(x, y, z, t) + rate * gamma * (ref - u)
     if sponge_active
-        # The reference profiles the momentum sponge relaxes toward when the boundary
-        # source carries no currents. The sponge's geometry is the mask and its rate is
-        # the `Relaxation`; this is only the velocity profile.
-        (u_ref, v_ref) = reference_inflow_profiles(u_inflow, v_inflow, u_decay, v_decay)
+        # Rotate prescribed inflow velocity vector into grid axes if planar projection
+        eff_u_inflow, eff_v_inflow = if projection !== nothing && is_planar(projection)
+            rotate_vector_to_grid(projection, u_inflow, v_inflow, lon_c, lat_c)
+        else
+            (u_inflow, v_inflow)
+        end
+        (u_ref, v_ref) = reference_inflow_profiles(eff_u_inflow, eff_v_inflow, u_decay, v_decay)
 
         relax_rate = 1.0 / Float64(sponge_tau)
         # Quadratic sponge weight, zero in the interior and 1 on the designated open boundaries.
-        # Boundaries not in `active_boundaries` (e.g. northern continental margin) have zero weight.
         act_b_syms = Tuple(Symbol(lowercase(string(b))) for b in active_boundaries)
         act_e = :east in act_b_syms
         act_w = :west in act_b_syms
@@ -338,24 +346,9 @@ function build_hydrodynamic_model(
         act_s = :south in act_b_syms
 
         sponge_mask = CartesianSpongeMask(
-            lon_min_grid, lon_max_grid, lat_min_grid, lat_max_grid, sponge_width,
+            lon_min_grid, lon_max_grid, lat_min_grid, lat_max_grid, eff_sponge_width,
             act_e, act_w, act_n, act_s
         )
-        # The momentum sponge's target, materialised onto the model's own faces.
-        #
-        # With observed boundary velocities (GLORYS `uo`/`vo`) the sponge relaxes toward the
-        # measured current; without them it falls back to the analytical `ExponentialInflow`
-        # reference profile, which is a uniform westward velocity of `u_inflow` over the
-        # whole eastern face. That fallback is a hand-entered number standing in for the
-        # Nova Scotia Current, and a model whose open edges are its main water source and
-        # whose inflow speed is a constant is resting on two numbers.
-        #
-        # The target is a FIELD, and that is not incidental. A `Relaxation` whose target is
-        # a `Field` lowers into a GPU kernel; one whose target is a callable does not,
-        # unless the callable is `isbits` -- and the observed current is not known to be
-        # expressible as an `isbits` object at all. The tidal coefficients ARE: they are a
-        # small NamedTuple of numbers, which is why the tidal relaxation can be a callable
-        # and the momentum one cannot be.
         u_target = _materialise_boundary_velocity(
             grid,
             if !isnothing(boundary_velocities) && haskey(boundary_velocities, :u)
@@ -372,21 +365,8 @@ function build_hydrodynamic_model(
             end, :y)
 
         # Disentangle the upstream inflow momentum forcing from the lateral radiation sponge.
-        #
-        # Physical Dynamics:
-        # Inflow boundary (East): Nudges the incoming Labrador / Nova Scotia Current jet
-        # toward `u_inflow` (-0.10 m/s).
-        # Open Atlantic boundary (South): Radiation/damping boundary spanning steep shelf-break
-        # canyons. Relaxing horizontal velocity toward a non-zero along-shelf velocity across
-        # steep canyon walls (where z = -330 m) creates immense artificial volume flux divergence
-        # ∇_h · u_h and triggers diagnostic vertical velocity w blowup in hydrostatic models.
-        #
-        # For momentum, relax toward `u_target` exclusively where inflow is physically active
-        # (East boundary). Along radiation boundaries (South boundary), relax momentum toward
-        # (u, v) = (0, 0) to damp reflections without driving cross-isobath shear.
-        # For tracers, `sponge_mask` continues to relax across all active open boundaries (East + South).
         inflow_sponge_mask = CartesianSpongeMask(
-            lon_min_grid, lon_max_grid, lat_min_grid, lat_max_grid, sponge_width,
+            lon_min_grid, lon_max_grid, lat_min_grid, lat_max_grid, eff_sponge_width,
             act_e, act_w, false, false
         )
 
@@ -572,22 +552,31 @@ function build_hydrodynamic_model(
     active_closure = (vertical_closure, horizontal_closure)
 
     kwargs = Dict{Symbol, Any}(
-
         :closure => active_closure,
         :tracers => active_tracers,
-        # `buoyancy` replaces the removed `equation_of_state` + `reference_density` model kwargs:
-        # a `SeawaterBuoyancy` wraps the identical TEOS-10 equation of state at the same rho0.
-        # The read side (`model_equation_of_state` in `simulation.jl`) expects
-        # `model.buoyancy.formulation.equation_of_state`, exactly what this construction yields.
         :buoyancy => SeawaterBuoyancy(equation_of_state = TEOS10EquationOfState(; reference_density = Float64(reference_density))),
-        # `bottom_drag` / `cd_drag` are not valid `HydrostaticFreeSurfaceModel` kwargs in this
-        # pinned Oceananigans build, so the quadratic seabed friction is applied as a
-        # `BulkDrag` bottom boundary condition instead (see `bottom_drag_bc` above). The
-        # read side (`model_equation_of_state` in `simulation.jl`) expects
-        # `model.buoyancy.formulation.equation_of_state`, exactly what this construction yields.
         :boundary_conditions => merge(user_bcs, boundary_conditions),
         :forcing => merged_forcing
     )
+    if coriolis !== nothing
+        kwargs[:coriolis] = coriolis
+    elseif base_g isa Oceananigans.Grids.RectilinearGrid
+        c_lat = if projection !== nothing && isdefined(projection, :lat_center)
+            Float64(projection.lat_center)
+        elseif !isnothing(lat_range)
+            0.5 * (Float64(lat_range[1]) + Float64(lat_range[2]))
+        else
+            44.5
+        end
+        rot_deg = if projection !== nothing && isdefined(projection, :rotation_deg)
+            Float64(projection.rotation_deg)
+        elseif projection isa RotatedFrame
+            Float64(projection.angle_deg)
+        else
+            0.0
+        end
+        kwargs[:coriolis] = ProjectedBetaPlane(latitude = c_lat, angle_deg = rot_deg)
+    end
     isnothing(free_surface) || (kwargs[:free_surface] = free_surface)
     isnothing(momentum_advection) || (kwargs[:momentum_advection] = momentum_advection)
     isnothing(tracer_advection) || (kwargs[:tracer_advection] = tracer_advection)
@@ -638,7 +627,8 @@ function woa23_regridded_tracers(
     grid,
     temperature_file::AbstractString,
     salinity_file::AbstractString;
-    oxygen_file::Union{Nothing, AbstractString} = nothing
+    oxygen_file::Union{Nothing, AbstractString} = nothing,
+    projection = nothing,
 )
     base_g = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
 
@@ -652,24 +642,14 @@ function woa23_regridded_tracers(
     T_interp = build_woa_interpolator(T_vals, lon_src, lat_src, dep_src)
     S_interp = build_woa_interpolator(S_vals, lon_src, lat_src, dep_src)
 
-    # The model grid routinely extends outside the downloaded subset (a WOA request may
-    # cover only the study box while the grid is larger) and far below the deepest WOA
-    # level, so every query is clamped into the dataset's own bounds. Without this the
-    # interpolator would throw on out-of-bounds indices; with it, boundary cells take the
-    # nearest available value instead of an extrapolation. `read_woa_variable` has already
-    # wrapped longitudes into signed degrees East, so longitude needs only clamping.
-    #
-    # The clamping, the coordinate-to-index conversion and the sign of `z` all live in
-    # `_grid_tracer_query`, because they are the three ways a per-source copy of this went
-    # wrong; see its docstring.
-    out = (T = _grid_tracer_query(T_interp, lon_src, lat_src, dep_src),
-           S = _grid_tracer_query(S_interp, lon_src, lat_src, dep_src))
+    out = (T = _grid_tracer_query(T_interp, lon_src, lat_src, dep_src; projection = projection),
+           S = _grid_tracer_query(S_interp, lon_src, lat_src, dep_src; projection = projection))
 
     if !isnothing(oxygen_file) && isfile(oxygen_file)
         O_vals, _, _, _ = read_woa_variable(oxygen_file, "o_an")
         if size(O_vals) == size(T_vals)
             O_interp = build_woa_interpolator(O_vals, lon_src, lat_src, dep_src)
-            out = merge(out, (O_2 = _grid_tracer_query(O_interp, lon_src, lat_src, dep_src),))
+            out = merge(out, (O_2 = _grid_tracer_query(O_interp, lon_src, lat_src, dep_src; projection = projection),))
         else
             @warn "Skipping dissolved oxygen: WOA23 oxygen grid $(size(O_vals)) does not match " *
                   "the temperature/salinity grid $(size(T_vals))."
@@ -680,24 +660,13 @@ function woa23_regridded_tracers(
 end
 
 """
-    _grid_tracer_query(itp, lon, lat, depth) -> (x, y, z) -> value
+    _grid_tracer_query(itp, lon, lat, depth; projection = nothing) -> (x, y, z) -> value
 
 Interpolate one source field onto the model grid, given an interpolant `itp` over source axes
-`lon`, `lat` (degrees East/North) and `depth` (positive down).
-
-Three things happen here, and each was wrong in its own copy when this was written per source:
-
-* the query is **clamped** to the source bounds, because the model grid is routinely larger
-  than the subset that was fetched — the alternative is an out-of-bounds throw, or worse, an
-  extrapolation nobody asked for;
-* physical coordinates are converted to the **interpolator's index coordinates** by a table
-  lookup, not a linear rescale — a rescale maps an n-point axis onto [1, 2] rather than [1, n],
-  which samples the first column of the file at every cell and looks like a field;
-* the model grid's `z` is **negated**, since it is negative-down (0 at the surface) while every
-  source axis here is positive-down — without the sign flip every query lands in the top level
-  and the stratification collapses.
+`lon`, `lat` (degrees East/North) and `depth` (positive down). When `projection` is a planar
+map projection, `(x, y)` in grid metres are inverse-projected into `(lon, lat)` degrees.
 """
-function _grid_tracer_query(itp, lon, lat, depth)
+function _grid_tracer_query(itp, lon, lat, depth; projection = nothing)
     lo_z, hi_z = Float64(first(depth)), Float64(last(depth))
     lo_y, hi_y = Float64(first(lat)), Float64(last(lat))
     lo_x, hi_x = Float64(first(lon)), Float64(last(lon))
@@ -705,33 +674,35 @@ function _grid_tracer_query(itp, lon, lat, depth)
     to_index(v) = t -> clamp(searchsortedlast(v, Float64(t)), 1, length(v))
     to_ix, to_iy, to_iz = to_index(lon), to_index(lat), to_index(depth)
 
-    return (x, y, z) -> itp(
-        to_iz(clamp(-Float64(z), lo_z, hi_z)),
-        to_iy(clamp(Float64(y), lo_y, hi_y)),
-        to_ix(clamp(Float64(x), lo_x, hi_x))
-    )
+    if projection !== nothing && is_planar(projection)
+        return (x, y, z) -> begin
+            lon_pt, lat_pt = inverse_project(projection, x, y)
+            itp(
+                to_iz(clamp(-Float64(z), lo_z, hi_z)),
+                to_iy(clamp(Float64(lat_pt), lo_y, hi_y)),
+                to_ix(clamp(Float64(lon_pt), lo_x, hi_x))
+            )
+        end
+    else
+        return (x, y, z) -> itp(
+            to_iz(clamp(-Float64(z), lo_z, hi_z)),
+            to_iy(clamp(Float64(y), lo_y, hi_y)),
+            to_ix(clamp(Float64(x), lo_x, hi_x))
+        )
+    end
 end
 
 """
-    copernicus_regridded_tracers(grid, file; month = 1) -> (T = …, S = …)
+    copernicus_regridded_tracers(grid, file; month = 1, projection = nothing) -> (T = …, S = …)
 
 Read a Copernicus Marine subset and return **callable interpolants** of temperature `T` (°C)
 and salinity `S` (PSU) on the model grid.
-
-The file is the one `fetch_copernicus_physics_subset` writes: `thetao`/`so` on
-`(longitude, latitude, depth, time)` with twelve monthly steps. `month` picks the step.
-
-This is deliberately not a second reader. The variability between hydrography *sources* is
-which variable is called what and how the axes are spelled, and `read_woa_variable` already
-resolves both — it normalises the depth convention, wraps longitudes, selects the time step
-and maps land to NaN. What differs here is only the variable names, so the reader is shared
-and this function supplies them. The alternative — a per-provider reader — is how this
-package came to hold two WOA23 readers that had drifted apart.
 """
 function copernicus_regridded_tracers(
     grid,
     file::AbstractString;
-    month::Int = 1
+    month::Int = 1,
+    projection = nothing
 )
     T_vals, lon, lat, dep = read_woa_variable(file, "thetao"; month = month)
     S_vals, _, _, _ = read_woa_variable(file, "so"; month = month)
@@ -743,8 +714,8 @@ function copernicus_regridded_tracers(
     T_interp = build_woa_interpolator(T_vals, lon, lat, dep)
     S_interp = build_woa_interpolator(S_vals, lon, lat, dep)
 
-    return (T = _grid_tracer_query(T_interp, lon, lat, dep),
-            S = _grid_tracer_query(S_interp, lon, lat, dep))
+    return (T = _grid_tracer_query(T_interp, lon, lat, dep; projection = projection),
+            S = _grid_tracer_query(S_interp, lon, lat, dep; projection = projection))
 end
 
 """
@@ -915,7 +886,7 @@ end
 """
     _read_woa_variable_zarr(filepath, varname; month = 1) -> (values, lon, lat, depth)
 
-The Zarr form of `read_woa_variable`, for a store the `GeoData` assimilation wrote.
+The Zarr form of `read_woa_variable`, for a store the `Tethys` assimilation wrote.
 
 A Zarr array carries no dimension *names*, so the layout is resolved from the axes it declares:
 each of the variable's dimensions is matched, by length, to the coordinate variable of the same

@@ -1,7 +1,7 @@
 # Notebooks
 
 A Pluto notebook for the ocean model: build the grid, inspect the seabed, run the simulation,
-and read the GeoData store back — without re-deriving the pipeline by hand.
+and read the Tethys store back — without re-deriving the pipeline by hand.
 
 | Notebook | Domain | Run length | Inputs |
 |---|---|---|---|
@@ -32,7 +32,7 @@ the store's interval count move costs no more than the changed part.
 ## Where the run writes
 
 Each notebook sets `OUTDIR` in its configuration cell: the directory the run writes to — the
-fetched bathymetry, coastline and winds, the GeoData store, and the checkpoint. Point it anywhere
+fetched bathymetry, coastline and winds, the Tethys store, and the checkpoint. Point it anywhere
 to keep a scratch run out of the shared lakehouse:
 
 ```julia
@@ -43,14 +43,14 @@ The notebook re-derives its options from that value, so the TOML itself is never
 
 ## What a notebook reads
 
-Every input comes from the shared lakehouse through the GeoData layer:
-* bathymetry, coastline and winds via `GeoDataSources`, under `lakehouse/GeoData/`
-* the realized flow, written to `lakehouse/GeoOceanModel/<run>/hydrodynamics.zarr`
+Every input comes from the shared lakehouse through the Tethys layer:
+* bathymetry, coastline and winds via `GeoDataSources`, under `lakehouse/Tethys/`
+* the realized flow, written to `lakehouse/TethysFlow/<run>/hydrodynamics.zarr`
 
-The shared lakehouse path is canonically resolved through `GeoData.lakehouse_dir()`.
+The shared lakehouse path is canonically resolved through `Tethys.lakehouse_dir()`.
 Precedence:
 * `ENV["GEOCEAN_STORE_ROOT"]` or `ENV["GEODATA_LAKEHOUSE"]`
-* `LocalPreferences.toml` (`[GeoData] lakehouse_dir`)
+* `LocalPreferences.toml` (`[Tethys] lakehouse_dir`)
 * `~/.geodata/storage.toml` (`[storage] store_root`)
 * Proximity fallback (`projects/lakehouse/`)
 

@@ -1,10 +1,10 @@
 # =============================================================================
-# GeoOceanModel - Default Demonstration Configuration
+# TethysFlow - Default Demonstration Configuration
 # =============================================================================
 # Baseline configuration for 3D regional ocean hydrodynamics, tidal forcing,
 # and surface boundary interactions.
 #
-#   julia --project=. GeoOceanModelRun.jl --config=configs/default.toml --all
+#   julia --project=. TethysFlowRun.jl --config=configs/default.toml --all
 # =============================================================================
 
 [domain]
@@ -72,9 +72,9 @@ v_inflow = 0.05               # Prescribed background meridional inflow velocity
 # body forcing caused (8-13 m/s divergence within 6 hours).
 #
 # For this Scotian Shelf run, tide is enabled in the ocean model at the boundary
-# only (placement = "boundary"). GeoLarvalTracking will add its own analytic
+# only (placement = "boundary"). TethysDrift will add its own analytic
 # tidal velocity at particle time. If you want consistency between the two,
-# disable tide in GeoLarvalTracking or set enable_tides = false here.
+# disable tide in TethysDrift or set enable_tides = false here.
 #
 enable_tides = true             # Enable TPXO9 tidal boundary forcing
 tides_source = "tpxo9"          # TPXO9 global tidal atlas (not "analytic")
@@ -116,24 +116,13 @@ reuse_hydro = false           # Reuse existing flow fields if found on disk
 #   <output_dir>/inputs/              the ingested-data cache for this run
 # There is no separate path setting: a second path for the same store is a second
 # source of truth, and the two disagreeing is a silent data-loss bug.
-output_dir = "../lakehouse/GeoOceanModel/default" # Target Lakehouse output directory
+output_dir = "../lakehouse/TethysFlow/default" # Target Lakehouse output directory
 output_schedule_seconds = 21600.0 # Field-output interval (seconds, 6 hours)
 enable_checkpoint = true      # Save Oceananigans simulation checkpointer state
 checkpoint_prefix = "default_checkpoint" # Filename prefix for checkpoint files
 checkpoint_schedule_seconds = 21600.0 # State checkpoint frequency in seconds
 checkpoint_cleanup = true     # Automatically purge older intermediate checkpoints
 run_id = ""                   # Unique run identifier tag
-
-[visualization]
-# Diagnostics, animations, and interactive mapping
-interactive_map = true        # Export interactive HTML5 Leaflet map
-animate_hydro = false         # Generate hydrodynamic simulation animation
-anim_variable = "dashboard"   # Variable: "dashboard", "speed", "temperature", "eta"
-anim_fps = 10                 # Animation frames per second
-anim_format = "mp4"           # Video container format: "mp4", "gif", or "webm"
-anim_depth = -2.5             # Depth slice for 2D flow animation (m)
-anim_overlay_particles = false# Render particle positions on top of flow field
-anim_output_path = ""         # Custom destination path for animation video
 
 [runtype]
 # Execution hardware and reproducibility

@@ -1,5 +1,5 @@
 # ==============================================================================
-# GeoOceanModel Comprehensive Test Suite Orchestrator
+# TethysFlow Comprehensive Test Suite Orchestrator
 # ==============================================================================
 
 import Pkg
@@ -21,9 +21,9 @@ end
 # ==============================================================================
 
 using Test
-using GeoOceanModel
-using GeoData
-using GeoDataSources
+using TethysFlow
+const TethysFlow = TethysFlow
+using Tethys
 using DataFrames
 using Oceananigans
 using JSON3
@@ -49,6 +49,10 @@ const AVAILABLE_SEGMENTS = Dict{Symbol, @NamedTuple{file::String, desc::String}}
     :sponge => (
         file = "test_sponge.jl",
         desc = "Lateral Sponge Relaxation"
+    ),
+    :projection => (
+        file = "test_projection.jl",
+        desc = "Map Projections, CoordRefSystems Integration, Vector Rotation & Beta Plane"
     )
 )
 
@@ -78,7 +82,7 @@ end
 
 requested_segments = parse_requested_segments(ARGS)
 
-@testset "GeoOceanModel Comprehensive Suite" begin
+@testset "TethysFlow Comprehensive Suite" begin
     for seg_key in requested_segments
         info = AVAILABLE_SEGMENTS[seg_key]
         println("\n" * "="^80)

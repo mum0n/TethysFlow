@@ -1,16 +1,14 @@
 """
-    geodata_integration.jl
+    tethys_integration.jl
 
-Oceananigans-dependent GeoData functions for ParticleTracking.
+Oceananigans-dependent Tethys functions for TethysFlow.
 
 Only functions requiring Oceananigans grid types are here.
-All other GeoDataSources functions should be called directly from 
 """
-module GeoDataIntegration
+module TethysIntegration
 
-using GeoData
-using GeoDataSources
-using GeoData.GeoDataTypes: GeoDataset, GeoArray, Dimension, CoordinateSystem
+using Tethys
+using Tethys.Types: GeoDataset, GeoArray, Dimension, CoordinateSystem
 using Oceananigans
 using Oceananigans.Grids: LatitudeLongitudeGrid
 using Oceananigans.ImmersedBoundaries: ImmersedBoundaryGrid
@@ -49,7 +47,7 @@ function georegrid_to_model_grid(src_ds::GeoDataset, model_grid; vars::Vector{St
       # is the signal to skip the dimension rather than a silent miss on a spelling
       # this function did not anticipate.
       src_deps = try
-          first(GeoData.axis(src_ds, :depth))
+          first(Tethys.axis(src_ds, :depth))
       catch
           nothing
       end
@@ -62,13 +60,13 @@ function georegrid_to_model_grid(src_ds::GeoDataset, model_grid; vars::Vector{St
     target_ds = GeoDataset(Dict{String, GeoArray}(), target_coords, target_dims, 
                           CoordinateSystem(crs="EPSG:4326"), Dict{String, Any}(), nothing, "target_grid")
     
-    return GeoData.georegrid(src_ds, target_ds; vars = vars)
+    return Tethys.georegrid(src_ds, target_ds; vars = vars)
 end
 
 """
     build_immersed_grid_from_geodata(grid, bathy_ds::GeoDataset; varname="elevation", min_water_depth=10.0)
 
-Build an ImmersedBoundaryGrid from a GeoData bathymetry dataset.
+Build an ImmersedBoundaryGrid from a Tethys bathymetry dataset.
 """
 function build_immersed_grid_from_geodata(
     grid::LatitudeLongitudeGrid,
@@ -77,7 +75,7 @@ function build_immersed_grid_from_geodata(
     min_water_depth::Real = 10.0,
     mask_bay_of_fundy::Bool = false
 )
-    topo_matrix = GeoData.regrid_2d_field(bathy_ds, varname, 
+    topo_matrix = Tethys.regrid_2d_field(bathy_ds, varname, 
         collect(Float64, grid.λᶜᵃᵃ)[grid.Hx+1 : grid.Hx+grid.Nx],
         collect(Float64, grid.φᵃᶜᵃ)[grid.Hy+1 : grid.Hy+grid.Ny]
     )

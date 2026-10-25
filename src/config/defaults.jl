@@ -23,12 +23,12 @@ complete and answers a question nobody asked. Callers must fail loudly instead, 
 
 To run, pass one explicitly:
 
-    julia --project=. GeoOceanModelRun.jl --config=configs/scotian_shelf.toml
+    julia --project=. TethysFlowRun.jl --config=configs/scotian_shelf.toml
 
-or place `ParticleTracking.toml` at the project root.
+or place `TethysFlow.toml` at the project root.
 """
 function find_default_config_path()::String
-    for p in ("ParticleTracking.toml", "ParticleTracking.config")
+    for p in ("TethysFlow.toml", "TethysFlow.config")
         isfile(p) && return p
     end
     ""
@@ -38,7 +38,7 @@ const NO_CONFIG_ADVICE = """
 No configuration file was found.
 
 A configuration is required, not optional. It names the datasets to ingest, the domain and
-grid, the forcing sources, and the biology parameters, and those choices are what a run is.
+grid, the forcing sources, and the model parameters, and those choices are what a run is.
 Without one the package would have to invent all of it, and the resulting output would carry
 no statement of what it actually simulated -- it would be indistinguishable from a run that
 was configured deliberately.
@@ -51,12 +51,12 @@ Available configurations in this project:
 
 Run with one of:
 
-    julia --project=. GeoOceanModelRun.jl --config=configs/scotian_shelf.toml
+    julia --project=. TethysFlowRun.jl --config=configs/scotian_shelf.toml
 
-or copy one to ParticleTracking.toml at the project root, which the loader picks up
+or copy one to TethysFlow.toml at the project root, which the loader picks up
 automatically. For a study of your own, copy the closest config and edit the sections the
 run depends on: [data] for datasets, [domain] and [grid] for the box and resolution,
-[tides] for tidal forcing, and [biology] for larval parameters."""
+[tides] for tidal forcing, and [atmosphere] for wind and heat flux."""
 
 """
     study_domain_ranges(cfg) -> NamedTuple
@@ -110,7 +110,7 @@ end
     resolve_config_name(config_file::AbstractString = "") -> String
 
 Extract the base configuration name from a config file path, or return
-the default configuration name (`"ParticleTracking"`) if unspecified or empty.
+the default configuration name (`"TethysFlow"`) if unspecified or empty.
 
 # Inputs
 - `config_file::AbstractString`: Path to a `.toml` file or empty string.
@@ -122,7 +122,7 @@ function resolve_config_name(config_file::AbstractString = "")::String
     cfg_path = isempty(strip(config_file)) ? find_default_config_path() : String(config_file)
     base = basename(cfg_path)
     stem = splitext(base)[1]
-    return isempty(stem) ? "ParticleTracking" : stem
+    return isempty(stem) ? "TethysFlow" : stem
 end
 
 
@@ -204,76 +204,13 @@ function get_default_configuration()::Dict{String, Any}
             "enable_sea_ice" => true,
             "enable_oxygen" => true
         ),
-        "biology" => Dict{String, Any}(
-            "n_particles" => 100,
-            "track_duration_days" => 5.0,
-            "track_dt_seconds" => 300.0,
-            "min_seabed_depth" => 100.0,
-            "buffer_km" => 100.0,
-            "diffusivity_h" => 10.0,
-            "diffusivity_v" => 1e-4,
-            "release_depth_mode" => "bottom",
-            "bottom_release_offset" => [0.5, 3.0],
-            "enable_initial_ascent" => true,
-            "ascent_speed" => 0.010,
-            "ascent_target_depth" => -10.0
-        ),
-        "dvm" => Dict{String, Any}(
-            "enable_dvm" => true,
-            "megalopa_day_depth" => -120.0,
-            "megalopa_night_depth" => -60.0,
-            "zoea2_depth_factor" => 1.2,
-            "megalopa_swim_factor" => 1.5
-        ),
-        "molting_and_settlement" => Dict{String, Any}(
-            "enable_molting" => true,
-            "t_base" => 0.0,
-            "dd_zoea1_to_zoea2" => 150.0,
-            "dd_zoea2_to_megalopa" => 310.0,
-            "dd_megalopa_to_settle" => 510.0,
-            "mortality_base" => 0.02,
-            "mortality_thermal_threshold" => 10.0,
-            "mortality_thermal_sensitivity" => 0.015,
-            "settlement_min_depth" => -250.0,
-            "settlement_max_depth" => -50.0,
-            "settlement_max_temp" => 6.0
-        ),
-         "storage" => Dict{String, Any}(
-             "output_path" => joinpath("outputs", "particle_tracking.jld2"),
-                      "enable_checkpoint" => true,
-             "checkpoint_prefix" => "checkpoint_ParticleTracking",
-             "checkpoint_schedule_seconds" => 21600.0,
-             "checkpoint_dir" => "",
-             "checkpoint_cleanup" => true
-         ),
-        "tessellation" => Dict{String, Any}(
-            "enable_voronoi" => false,
-            "n_units" => 5000,
-            "prob_core" => 0.8,
-            "prob_shallow" => 0.1,
-            "prob_deep" => 0.1,
-            "min_res_core_km" => 1.5,
-            "min_res_shallow_km" => 5.0,
-            "min_res_deep_km" => 10.0,
-            # Depth band edges as positive depths below the surface. Core is the mid-shelf
-            # nursery, shallow the nearshore strip, deep everything below the shelf break.
-            "core_depth_min" => 50.0,
-            "core_depth_max" => 350.0,
-            "shallow_depth_min" => 0.0,
-            "shallow_depth_max" => 50.0,
-            "deep_depth_min" => 350.0,
-            "deep_depth_max" => 6000.0,
-            "slope_weighting" => true,
-            "slope_factor" => 15.0
-        ),
-        "hardware" => Dict{String, Any}(
-            "use_gpu" => false,
-            # Off by default, and deliberately. A GPU request that cannot be honoured must
-            # fail loudly: silently running the CPU path instead would leave
-            # `resolved_config.toml` recording `use_gpu = true` for a run that never touched
-            # a GPU, which is the same silent lie the provenance file exists to prevent. Set
-            # it to true only on a machine where degrading is genuinely acceptable.
-            "fallback_to_cpu" => false
+        "storage" => Dict{String, Any}(
+            "output_path" => joinpath("outputs", "tethys_flow.jld2"),
+            "enable_checkpoint" => true,
+            "checkpoint_prefix" => "checkpoint_TethysFlow",
+            "checkpoint_schedule_seconds" => 21600.0,
+            "checkpoint_dir" => "",
+            "checkpoint_cleanup" => true
         ),
         "visualization" => Dict{String, Any}(
             "interactive_map" => true,
@@ -284,9 +221,11 @@ function get_default_configuration()::Dict{String, Any}
             "anim_depth" => -2.5,
             "anim_overlay_particles" => false,
             "anim_output_path" => "",
-            "title" => "Regional Marine Lagrangian Particle Tracking & Dispersion"
+            "title" => "Regional Coastal and Shelf Hydrodynamic Simulation"
         ),
-        "paths" => Dict{String, Any}(
+        "runtype" => Dict{String, Any}(
+            "use_gpu" => false,
+            "fallback_to_cpu" => false,
             "seed" => 42
         )
     )

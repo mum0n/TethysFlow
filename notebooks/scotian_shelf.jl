@@ -31,7 +31,7 @@ end
 
 # Activating the package directory from inside the notebook means Pluto's own environment never
 
-# needs this package, and `using GeoOceanModel` sees the working tree. A Pluto save of this file
+# needs this package, and `using TethysFlow` sees the working tree. A Pluto save of this file
 
 # stores the activate call, so re-opening it reproduces the same environment.
 
@@ -41,7 +41,7 @@ Pkg.activate(normpath(joinpath(@__DIR__, "..")))
 
 # ╠═╡
 
-using GeoOceanModel
+using TethysFlow
 
 # ╔═╡ 2f9a1e77-5c34-4b8d-9a71-1c2f8b3e5a10
 
@@ -51,13 +51,13 @@ md"""
 
 # Scotian Shelf ocean model — the production configuration
 
-Work with the `scotian_shelf` domain end to end: resolve the seabed through the GeoData layer,
+Work with the `scotian_shelf` domain end to end: resolve the seabed through the Tethys layer,
 
 build the immersed grid, assemble the hydrostatic model, run the simulation, and read the
 
-resulting GeoData store back.
+resulting Tethys store back.
 
-Every input is a named, published product piped in through **GeoData** (`GeoDataSources`), and
+Every input is a named, published product piped in through **Tethys** (`GeoDataSources`), and
 
 every output lands in the shared lakehouse. Nothing here is synthetic stand-ins: if a download
 
@@ -113,7 +113,7 @@ The first three cells pin the working directory, activate **this package's envir
 
 load the package, so the `../geodatalakehouse/...` paths in the configs resolve to
 
-`projects/lakehouse/` rather than to a directory inside the package, and `using GeoOceanModel`
+`projects/lakehouse/` rather than to a directory inside the package, and `using TethysFlow`
 
 loads the working tree rather than a registered version.
 
@@ -155,9 +155,9 @@ Every input this run reads is a *published product*, and each one is assimilated
 
 shared lakehouse rather than being re-downloaded per run. This is the step that happens before
 
-the first segment: the inputs are converted into GeoData stores under
+the first segment: the inputs are converted into Tethys stores under
 
-`projects/lakehouse/GeoData/`, and they stay there.
+`projects/lakehouse/Tethys/`, and they stay there.
 
 The lakehouse has one directory per half, so the split is visible in the paths themselves:
 
@@ -165,7 +165,7 @@ The lakehouse has one directory per half, so the split is visible in the paths t
 
 lakehouse/
 
-  GeoData/            shared products, one directory per source
+  Tethys/            shared products, one directory per source
 
     etopo2022.bathymetry    measured sea floor
 
@@ -179,7 +179,7 @@ lakehouse/
 
     glorys/    GLORYS12V1 open-boundary water
 
-  GeoOceanModel/    this half's runs
+  TethysFlow/    this half's runs
 
     scotian_shelf/hydrodynamics.zarr    the flow solution this run writes
 
@@ -197,7 +197,7 @@ product list is the truth about what was used.
 
 That is a different kind of assimilation from a conversion step: the inputs are already
 
-GeoData objects (a Zarr array, a Parquet table, a NetCDF field), so nothing is *converted* —
+Tethys objects (a Zarr array, a Parquet table, a NetCDF field), so nothing is *converted* —
 
 what is converted is the position, from the publisher's URL to a place this machine keeps.
 
@@ -231,9 +231,9 @@ and an account" and discovering it at the boundary segment, after the grid is bu
 
 # ╠═╡
 
-opts = GeoOceanModel.configuration_to_options(
+opts = TethysFlow.configuration_to_options(
 
-    GeoOceanModel.load_configuration("configs/scotian_shelf.toml")
+    TethysFlow.load_configuration("configs/scotian_shelf.toml")
 
 )
 
@@ -241,13 +241,13 @@ opts = GeoOceanModel.configuration_to_options(
 
 # ╠═╡
 
-assimilated = GeoOceanModel.assimilation_status(opts)
+assimilated = TethysFlow.assimilation_status(opts)
 
 # ╔═╡ b6c24e85-1f7a-4d49-9f3e-5f0d4b7c1e68
 
 # ╠═╡
 
-GeoOceanModel.report_assimilation_status(stdout, assimilated)
+TethysFlow.report_assimilation_status(stdout, assimilated)
 
 # ╔═╡ c7d35f96-2a8b-4c5a-9f4f-0b1e5c8d2f79
 
@@ -283,7 +283,7 @@ exists for. Two facts matter for planning:
 
 realized flow solution, read by the larval half through the store's own path. The store carries
 
-the grid, the times and the fields as a GeoData dataset, so a reader needs no sidecar and no
+the grid, the times and the fields as a Tethys dataset, so a reader needs no sidecar and no
 
 knowledge of how it was written.
 
@@ -345,7 +345,7 @@ first is data you can inspect and edit, the second is what the code actually run
 
 ### Where the run writes
 
-Everything this run writes — the fetched bathymetry, coastline and winds, the GeoData store, and
+Everything this run writes — the fetched bathymetry, coastline and winds, the Tethys store, and
 
 the JLD2 checkpoint with its checkpoints — goes to **`OUTDIR`**. Point it anywhere: an absolute
 
@@ -377,9 +377,9 @@ the bathymetry, coastline and wind artefacts all land there.
 
 # ╠═╡
 
-import GeoOceanModel: load_configuration, configuration_to_options
+import TethysFlow: load_configuration, configuration_to_options
 
-const OUTDIR = normpath(joinpath("..", "lakehouse", "GeoOceanModel", RUN))
+const OUTDIR = Tethys.lakehouse_dir("TethysFlow", RUN)
 
 cfg = load_configuration(joinpath("configs", string(RUN, ".toml")))
 
@@ -417,21 +417,21 @@ run's own directory on the right.
 
 projects/
 
-# ╠═╡  GeoOceanModel/            this package: grid, physics, ocean figures
+# ╠═╡  TethysFlow/            this package: grid, physics, ocean figures
 
 # ╠═╡    └── configs/*.toml        the shipped run definitions
 
-# ╠═╡  GeoData/                  the abstraction layer: geoload / geosave / landmask
+# ╠═╡  Tethys/                  the abstraction layer: geoload / geosave / landmask
 
 # ╠═╡  GeoDataSources/           the fetchers: what gets downloaded, and where it is cached
 
 # ╠═╡  lakehouse/
 
-    ├── GeoData/              the central assimilated caches: woa23, tpxo9, glorys,
+    ├── Tethys/              the central assimilated caches: woa23, tpxo9, glorys,
 
     │                         etopo2022, era5 — fetched once per machine, not once per run
 
-    └── GeoOceanModel/
+    └── TethysFlow/
 
         └── scotian_shelf/    this run's directory
 
@@ -439,7 +439,7 @@ projects/
 
             ├── checkpoints/  Oceananigans state checkpoints (restart from here)
 
-            └── hydrodynamics.zarr   the realized flow, as a GeoData store
+            └── hydrodynamics.zarr   the realized flow, as a Tethys store
 
 ```
 
@@ -453,7 +453,7 @@ downloading it again. It also means two runs of the *same* config share an input
 
 visible difference rather than a silent one.
 
-The store this notebook ends with — `hydrodynamics.zarr` — is a self-contained GeoData directory.
+The store this notebook ends with — `hydrodynamics.zarr` — is a self-contained Tethys directory.
 
 The coordinates live inside its attributes alongside `time.json`, so the file is the handover;
 
@@ -543,7 +543,7 @@ carries no currents, and for a dispersal calculation the volume coming through t
 
 # ╠═╡
 
-import GeoOceanModel: run_segment_data, _run_bathymetry
+import TethysFlow: run_segment_data, _run_bathymetry
 
 data_res = run_segment_data(; opts = opts)
 
@@ -609,7 +609,7 @@ fails loudly instead of quietly running somewhere other than where the config sa
 
 # ╠═╡
 
-import GeoOceanModel: run_segment_grid
+import TethysFlow: run_segment_grid
 
 grid_res = run_segment_grid(; opts = opts)
 
@@ -772,117 +772,53 @@ diagnostics; `enable_oxygen` carries O₂ as a prognostic tracer, which WOA23 ca
 """
 
 # ╔═╡ 06715480-1dc9-4a01-9b12-9a4e2f7b0c58
-
 # ╠═╡
-
-import GeoOceanModel: run_segment_model
-
-built = run_segment_model(; opts = opts, immersed_grid = grid_res.immersed_grid)
-
-println("Simpson-Hunter, shallow bank : ", built.simpson_hunter_bank)
-
-println("Simpson-Hunter, deep shelf    : ", built.simpson_hunter_shelf)
-
-built
-
-# ╔═╡ 17826591-2e0a-4b12-9c23-ab5f308c1d69
-
-# ╠═╡
-
-md"""
-
-## Run the simulation, and what it writes
-
-`run_segment_simulation` advances the model and writes the flow into the GeoData store. On the
-
-CLI, `--all` runs exactly these cells plus the data and grid segments.
-
-### The output cadence is its own decision
-
-`[storage] output_schedule_seconds = 1800` — one field snapshot every half hour, independent of
-
-`checkpoint_schedule_seconds = 3600`. The two were once the same knob; separating them was the
-
-point, because a 6-hour field cadence over a 30-day run is 121 intervals, whereas a checkpoint
-
-every 6 hours over the same run restarts from a state up to 6 hours stale. Cadence decides how
-
-much disk the run uses and how smooth an animation looks; checkpoint cadence decides how much
-
-work a crash loses — with `auto_restart = true` a re-run picks that state up.
-
-### What lands in the store
-
-- **u, v, w, T per interval** — the store keeps the model's native stagger, and the reader blends
-
-  it to cell centres (so a `u` array is not simply the `u` that was written).
-
-- **the grid's coordinates** travel inside the store's attributes, alongside `time.json`. That is
-
-  what lets the handover be a directory with nothing beside it.
-
-- **no salinity**: density read back is a thermal approximation, as above.
-
-Re-running with a longer `sim_duration_hours` resumes from the checkpoint when
-
-`auto_restart = true`, rather than starting over.
-
-Toggle whether to load pre-computed simulation outputs if present, or force re-running the integration:
-
-"""
+# Manual execution switch: defaults to false so opening the notebook does NOT run the model.
+# Set `run_model = true` ONLY when intending to perform numerical integration and overwrite/update the lakehouse store.
+run_model = false
 
 # ╔═╡ b0000001-0001-0001-0001-000000000006
 # ╠═╡
 md"""
-## Running the simulation
+## Running the simulation or loading lakehouse results
 
-This notebook **reads** a completed run; it does not integrate the model. The code that does
-the integration is shown here for the record, and is run from the command line:
-
-```bash
-julia --project=. GeoOceanModelRun.jl --config=$(opts.config_file) --all --overwrite
-```
-
-or, equivalently, from inside a Julia session with this package loaded:
-
-```julia
-import GeoOceanModel: run_segment_data, run_segment_grid, run_segment_model, run_segment_simulation
-opts  = GeoOceanModel.configuration_to_options("$(opts.config_file)")
-data  = run_segment_data(; opts = opts)
-grid  = run_segment_grid(; opts = opts)
-built = run_segment_model(; opts = opts, immersed_grid = grid.immersed_grid)
-res   = run_segment_simulation(; opts = opts, model = built.model)
-```
-
-`--overwrite` clears a previous store first; without it a re-run resumes from the checkpoint.
-The next cell loads whatever the store holds. If there is no store, it stops and says which
-command produces one — the decision to run a multi-hour integration belongs to you, not to a
-notebook cell.
+> ⚠️ **WARNING: STORE OVERWRITE HAZARD**
+>
+> Setting `run_model = true` initiates full 3D hydrodynamic numerical integration using `Oceananigans.jl`.
+> Running the model manually may **overwrite or modify existing simulation data and checkpoints**
+> stored in the lakehouse directory:
+>
+> `$(opts.output_dir)`
+>
+> By default, `run_model = false`, loading previously computed lakehouse results for analysis and plotting.
 """
 
 # ╔═╡ 28937602-3f1b-4c23-9d34-bc60419d2e7a
-
-import GeoOceanModel: output_zarr_path
-
-# The simulation is NOT run here. The code that runs it is shown above, for the record;
-# this cell only reads what a previous run left in the store. If the store is absent,
-# this cell stops and says so, rather than starting a run that would take hours.
+import TethysFlow: output_zarr_path, run_segment_model, run_segment_simulation
 
 sim_res = begin
     expected_store = output_zarr_path(opts.output_dir)
     store_exists = isdir(expected_store) && !isempty(readdir(expected_store))
 
-    if !store_exists
-        error(
-            "No hydrodynamic store at $(expected_store).\n" *
-            "This notebook reads a completed run; it does not run the model.\n" *
-            "To produce one, run either\n" *
-            "    julia --project=. GeoOceanModelRun.jl --config=$(opts.config_file) --all --overwrite\n" *
-            "from the package root, or uncomment the `run_segment_simulation` line in the cell above.")
+    if run_model
+        @warn "Executing numerical integration: this will update/overwrite store at $(expected_store)"
+        println("Assembling hydrodynamic model...")
+        built = run_segment_model(; opts = opts, immersed_grid = grid_res.immersed_grid)
+        println("Running simulation integration...")
+        res = run_segment_simulation(; opts = opts, model = built.model)
+        (output_path = opts.output_dir, model = built.model)
+    else
+        if !store_exists
+            error(
+                "No hydrodynamic store found at $(expected_store).\n" *
+                "By default, this notebook loads existing lakehouse simulation results.\n" *
+                "To execute the simulation manually and create the store, set `run_model = true` in the cell above,\n" *
+                "or run from the command line:\n" *
+                "    julia --project=. TethysFlowRun.jl --config=$(opts.config_file) --all --overwrite")
+        end
+        println("Loading saved lakehouse hydrodynamic solution from: ", expected_store)
+        (output_path = opts.output_dir, model = nothing)
     end
-
-    println("Reading hydrodynamic solution from: ", expected_store)
-    (output_path = opts.output_dir, model = built.model)
 end
 
 # ╔═╡ 39348713-402c-4d34-9e45-cd71520e3f8b
@@ -919,15 +855,15 @@ Three checks that mean "this is the real run and not the synthetic fallback":
 
 # ╠═╡
 
-import GeoOceanModel: extract_hydrodynamic_dataset, output_zarr_path
+import TethysFlow: extract_hydrodynamic_dataset, output_zarr_path
 
-using GeoData
+using Tethys
 
 store_dir = output_zarr_path(sim_res.output_path)
 
-# The store's time axis is a Zarr array, not a side-car JSON file: the GeoData Zarr backend
+# The store's time axis is a Zarr array, not a side-car JSON file: the Tethys Zarr backend
 # keeps the coordinate in the group alongside the field variables.
-_times = Float64.(collect(GeoData.geoload(store_dir; backend = :zarr).coords[:time].data))
+_times = Float64.(collect(Tethys.geoload(store_dir; backend = :zarr).coords[:time].data))
 
 println("store     : ", store_dir)
 
@@ -977,8 +913,8 @@ Print one profile rather than a volume: a single column is where stratification 
 
 # ╔═╡ 7d68cb57-846f-4e78-9b89-015964272c1f
 
-import GeoOceanModel: compute_hydrodynamic_diagnostics
-import GeoOceanModel: animate_hydrodynamic_field
+import TethysFlow: compute_hydrodynamic_diagnostics
+import TethysFlow: animate_hydrodynamic_field
 
 using Statistics
 
@@ -1214,7 +1150,7 @@ begin
     using CairoMakie
     import CairoMakie: record
     
-    # Animate surface current speed over time from the stored GeoData archive
+    # Animate surface current speed over time from the stored Tethys archive
     anim_path = joinpath(OUTDIR, "outputs", "surface_speed_animation.mp4")
     mkpath(dirname(anim_path))
     
@@ -1258,7 +1194,6 @@ end
 # ╠═e45f326e-9ba6-4f78-9d34-7f2a0b5c8d19
 # ╠═f560437f-0cb7-4e89-9e45-8a3b1c6d9e2a
 # ╠═06715480-1dc9-4a01-9b12-9a4e2f7b0c58
-# ╠═17826591-2e0a-4b12-9c23-ab5f308c1d69
 # ╠═b0000001-0001-0001-0001-000000000006
 # ╠═28937602-3f1b-4c23-9d34-bc60419d2e7a
 # ╠═39348713-402c-4d34-9e45-cd71520e3f8b

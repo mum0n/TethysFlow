@@ -53,7 +53,7 @@ tidal harmonics, air-sea heat fluxes, and Lagrangian snow crab
   where `use_gpu` said it would.
 - `interactive_map::Bool`: Whether to export interactive HTML5 Leaflet map.
 - `output_path::AbstractString`: Base path for simulation outputs. Extension determines format:
-  - `.zarr` or directory: Zarr storage via GeoData
+  - `.zarr` or directory: Zarr storage via Tethys
   - `.jld2`: Direct JLD2 file for hydrodynamic outputs
   - No extension: treated as directory for JLD2 files (legacy behavior)
 - `storage_backend::String`: Storage backend for larval data ("zarr" or "geoparquet").
@@ -310,6 +310,15 @@ struct HydrodynamicOptions
     cv_settlement            :: Float64  # coefficient of variation for settlement HSI (default 0.25)
     mask_bay_of_fundy        :: Bool     # whether Bay of Fundy shallows are masked to land
     active_boundaries        :: Tuple{Vararg{Symbol}} # active boundaries for relaxation
+    projection               :: String   # map projection ("geographic", "utm", "lambert", "mercator", "rotated")
+    projection_zone          :: Int      # UTM zone (0 = auto-determined from lon_center)
+    projection_lat1          :: Float64  # standard parallel 1 for conic/cylindrical (0.0 = auto)
+    projection_lat2          :: Float64  # standard parallel 2 for conic (0.0 = auto)
+    rotation_deg             :: Float64  # domain rotation angle in degrees (0.0 = unrotated geographic)
+    lon_center               :: Float64  # reference center longitude for rotated frame
+    lat_center               :: Float64  # reference center latitude for rotated frame
+    extent_x_km              :: Float64  # along-frame extent in km (if rotated)
+    extent_y_km              :: Float64  # cross-frame extent in km (if rotated)
 end
 
 function HydrodynamicOptions(;
@@ -430,7 +439,16 @@ function HydrodynamicOptions(;
     cv_mortality             :: Real = 0.25,
     cv_settlement            :: Real = 0.25,
     mask_bay_of_fundy        :: Bool = false,
-    active_boundaries                = (:east,)
+    active_boundaries                = (:east,),
+    projection               :: AbstractString = "geographic",
+    projection_zone          :: Integer = 0,
+    projection_lat1          :: Real = 0.0,
+    projection_lat2          :: Real = 0.0,
+    rotation_deg             :: Real = 0.0,
+    lon_center               :: Real = (domain_lon[1] + domain_lon[2]) / 2.0,
+    lat_center               :: Real = (domain_lat[1] + domain_lat[2]) / 2.0,
+    extent_x_km              :: Real = 0.0,
+    extent_y_km              :: Real = 0.0
 )
     resolved_cp_prefix = if !isempty(strip(checkpoint_prefix)) && checkpoint_prefix != "checkpoint"
         String(checkpoint_prefix)
@@ -563,7 +581,16 @@ function HydrodynamicOptions(;
         Float64(cv_mortality),
         Float64(cv_settlement),
         mask_bay_of_fundy,
-        Tuple(Symbol(lowercase(string(b))) for b in active_boundaries)
+        Tuple(Symbol(lowercase(string(b))) for b in active_boundaries),
+        String(projection),
+        Int(projection_zone),
+        Float64(projection_lat1),
+        Float64(projection_lat2),
+        Float64(rotation_deg),
+        Float64(lon_center),
+        Float64(lat_center),
+        Float64(extent_x_km),
+        Float64(extent_y_km)
     )
 end
 
@@ -611,21 +638,30 @@ struct HydrodynamicConfig
     sim_duration_seconds     :: Float64
     sim_dt_seconds           :: Float64
     adaptive_cfl             :: Bool
-     target_cfl               :: Float64
-     target_wave_cfl          :: Float64
-     max_dt_seconds           :: Float64
-     min_dt_seconds           :: Float64
-      coriolis_latitude        :: Float64
-       divergence_limit         :: Float64
-       output_path              :: AbstractString
-       output_schedule_seconds  :: Float64
-       enable_checkpoint        :: Bool
-       checkpoint_prefix        :: AbstractString
-       checkpoint_schedule      :: Real
-       checkpoint_dir           :: AbstractString
-       checkpoint_cleanup       :: Bool
-       auto_restart             :: Bool
-       use_gpu                  :: Bool
-       fallback_to_cpu          :: Bool
-  end
-
+    target_cfl               :: Float64
+    target_wave_cfl          :: Float64
+    max_dt_seconds           :: Float64
+    min_dt_seconds           :: Float64
+    coriolis_latitude        :: Float64
+    divergence_limit         :: Float64
+    output_path              :: AbstractString
+    output_schedule_seconds  :: Float64
+    enable_checkpoint        :: Bool
+    checkpoint_prefix        :: AbstractString
+    checkpoint_schedule      :: Real
+    checkpoint_dir           :: AbstractString
+    checkpoint_cleanup       :: Bool
+    auto_restart             :: Bool
+    use_gpu                  :: Bool
+    fallback_to_cpu          :: Bool
+    projection               :: String
+    projection_zone          :: Int
+    projection_lat1          :: Float64
+    projection_lat2          :: Float64
+    rotation_deg             :: Float64
+    lon_center               :: Float64
+    lat_center               :: Float64
+    extent_x_km              :: Float64
+    extent_y_km              :: Float64
+end
+

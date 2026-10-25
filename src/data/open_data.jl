@@ -1,11 +1,11 @@
 """
     open_data.jl
 
-ParticleTracking-specific data acquisition functions not covered by GeoDataSources.
+TethysFlow-specific data acquisition functions not covered by GeoDataSources.
 
 This module contains:
 - Configuration-dependent domain resolution
-- Source dispatchers that use ParticleTracking configuration
+- Source dispatchers that use TethysFlow configuration
 
 All generic geospatial data operations (bathymetry, winds, WOA23, coastlines, regridding)
 are in GeoDataSources, as are Copernicus Marine and synthetic data functions.
@@ -53,13 +53,13 @@ function fetch_surface_winds(source::AbstractString; lon_range, lat_range, time_
                             output_path, verbose::Bool = true)
     s = replace(lowercase(strip(source)), "-" => "_")
     if s in ("open_meteo", "era5", "open", "openmeteo")
-        return GeoDataSources.fetch_open_meteo_winds(
+        return Tethys.fetch_open_meteo_winds(
             lon_range = lon_range, lat_range = lat_range,
             time_iso = time_iso, output_path = output_path,
             verbose = verbose
         )
     elseif s in ("cds", "copernicus", "cdsapi")
-        return GeoDataSources.fetch_copernicus_surface_winds(
+        return Tethys.fetch_copernicus_surface_winds(
             lon_range = lon_range, lat_range = lat_range,
             time_iso = time_iso, output_path = output_path,
             verbose = verbose
@@ -141,7 +141,7 @@ end
 """
     read_wind_stress(filepath::AbstractString) -> NamedTuple
 
-Read kinematic surface stress from a wind file via GeoData with robust NetCDF fallback.
+Read kinematic surface stress from a wind file via Tethys with robust NetCDF fallback.
 """
 function read_wind_stress(filepath::AbstractString)
     try
@@ -334,7 +334,7 @@ function build_bulk_surface_flux(wind_file::AbstractString; albedo::Real = 0.06)
             rh = Float64.(ds.variables["relative_humidity"].data)
             cc = Float64.(ds.variables["cloud_fraction"].data)
             sw = Float64.(ds.variables["sw_down"].data)
-            tvec = first(GeoData.axis(ds, :time))
+            tvec = first(Tethys.axis(ds, :time))
 
             nt = size(tx, 3)
             tstep = nt > 1 ? (tvec[end] - tvec[1]) / (nt - 1) : 3600.0
@@ -498,7 +498,7 @@ const fetch_etopo2022_bathymetry = fetch_open_bathymetry
 """
     fetch_open_surface_winds(; kwargs...) -> String
 
-Fetch surface winds from Open-Meteo ERA5 via GeoDataSources.
+Fetch surface winds from Open-Meteo ERA5 via Tethys.
 """
 function fetch_open_surface_winds(;
     lon_range::Tuple{Real, Real} = (-71.0, -53.0),
@@ -507,7 +507,7 @@ function fetch_open_surface_winds(;
     output_path::AbstractString = joinpath("inputs", "surface_winds.zarr"),
     verbose::Bool = true
 )
-    return GeoDataSources.fetch_open_meteo_winds(;
+    return Tethys.fetch_open_meteo_winds(;
         lon_range = lon_range,
         lat_range = lat_range,
         time_iso = time_iso,
@@ -521,7 +521,7 @@ const fetch_open_meteo_surface_winds = fetch_open_surface_winds
 """
     fetch_natural_earth_coastline(; kwargs...) -> String
 
-Fetch Natural Earth coastline vector via GeoDataSources.
+Fetch Natural Earth coastline vector via Tethys.
 """
 function fetch_natural_earth_coastline(;
     lon_range::Tuple{Real, Real} = (-71.0, -53.0),
@@ -531,10 +531,10 @@ function fetch_natural_earth_coastline(;
     margin_deg::Real = 1.0,
     verbose::Bool = true
 )
-    # Delegate to the GeoData abstraction layer, qualified. Unqualified, this call
-    # resolves to THIS wrapper rather than to `GeoDataSources.fetch_natural_earth_coastline`
+    # Delegate to the Tethys abstraction layer, qualified. Unqualified, this call
+    # resolves to THIS wrapper rather than to `Tethys.fetch_natural_earth_coastline`
     # (both share the name), which is self-recursion and blows the stack.
-    return GeoDataSources.fetch_natural_earth_coastline(;
+    return Tethys.fetch_natural_earth_coastline(;
         lon_range = lon_range,
         lat_range = lat_range,
         resolution = resolution,
@@ -547,7 +547,7 @@ end
 """
     fetch_open_woa_climatology(; kwargs...) -> NamedTuple
 
-Fetch World Ocean Atlas 2023 climatology via GeoDataSources.
+Fetch World Ocean Atlas 2023 climatology via Tethys.
 """
 function fetch_open_woa_climatology(;
     lon_range::Tuple{Real, Real} = (-71.0, -53.0),
@@ -557,7 +557,7 @@ function fetch_open_woa_climatology(;
     include_o2::Bool = true,
     verbose::Bool = true
 )
-    return GeoDataSources.fetch_woa23(;
+    return Tethys.fetch_woa23(;
         lon_range = lon_range,
         lat_range = lat_range,
         month = month,
@@ -570,7 +570,7 @@ end
 """
     fetch_boundary_hydrography(source::Symbol; kwargs...) -> NamedTuple
 
-Acquire boundary hydrography via GeoDataSources.
+Acquire boundary hydrography via Tethys.
 
 With `with_velocities = true` the boundary zonal and meridional velocity are fetched
 and returned as well, for a momentum sponge that relaxes toward an observed current
@@ -602,7 +602,7 @@ end
 Download a regional subset of 3D temperature and salinity from Copernicus Marine (GLORYS).
 """
 function fetch_copernicus_physics_subset(; kwargs...)
-    return GeoDataSources.fetch_copernicus_physics_subset(; kwargs...)
+    return Tethys.fetch_copernicus_physics_subset(; kwargs...)
 end
 
 """
@@ -611,7 +611,7 @@ end
 Fetch 3D temperature/salinity from Copernicus Marine with dataset fallback chain.
 """
 function fetch_copernicus_hydrography_with_fallback(; kwargs...)
-    return GeoDataSources.fetch_copernicus_hydrography_with_fallback(; kwargs...)
+    return Tethys.fetch_copernicus_hydrography_with_fallback(; kwargs...)
 end
 
 """
@@ -620,5 +620,5 @@ end
 Fetch surface winds from Copernicus Climate Data Store (ERA5).
 """
 function fetch_copernicus_surface_winds(; kwargs...)
-    return GeoDataSources.fetch_copernicus_surface_winds(; kwargs...)
+    return Tethys.fetch_copernicus_surface_winds(; kwargs...)
 end

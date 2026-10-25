@@ -86,7 +86,7 @@ Single-segment surface-refined grid: `nz` layers from `-Lz` to 0, finest at the 
 
 This is a module-level, working replacement for the identically named helper that used to be
 defined inside [`src/model/numerical_earth.jl`](@ref) and was therefore **not visible at module
-scope** — the driver called it (`ParticleTrackingRun.jl`) and raised
+scope** — the driver called it (`TethysFlowRun.jl`) and raised
 `UndefVarError: stretched_tanh_z_faces not defined`, so a fresh hydrodynamics run could not build a
 grid at all. The 2-year archive in `work/` predates that breakage.
 

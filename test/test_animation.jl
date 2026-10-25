@@ -1,6 +1,7 @@
 using Test
-using GeoOceanModel
-using GeoData
+using TethysFlow
+const TethysFlow = TethysFlow
+using Tethys
 using Zarr
 
 const OCEAN_TMP_ANIM = joinpath(@__DIR__, "outputs", "_test_geoceanmodel_anim")
@@ -13,13 +14,13 @@ const OCEAN_TMP_ANIM = joinpath(@__DIR__, "outputs", "_test_geoceanmodel_anim")
 
     local d = joinpath(OCEAN_TMP_ANIM, "anim_store")
     local nx, ny, nz, nstep = 5, 4, 3, 4
-    local store = GeoOceanModel.output_zarr_path(d)
+    local store = TethysFlow.output_zarr_path(d)
     local lons = collect(1.0:nx)
     local lats = collect(1.0:ny)
     local depths = [-30.0, -10.0, -2.5]
     local times = Float64.(0:3600:(3600 * (nstep - 1)))
 
-    ds = GeoOceanModel._build_store_dataset(
+    ds = TethysFlow._build_store_dataset(
         store, (x = lons, y = lats, z = depths), ["u", "T"], nstep, nothing)
     for m in 1:nstep
         for k in 1:nz, j in 1:ny, i in 1:nx
@@ -30,7 +31,7 @@ const OCEAN_TMP_ANIM = joinpath(@__DIR__, "outputs", "_test_geoceanmodel_anim")
     Zarr.zopen(store, "w").arrays["time"][:] = times
 
     local out = joinpath(OCEAN_TMP_ANIM, "anim.gif")
-    local path = GeoOceanModel.animate_variable(
+    local path = TethysFlow.animate_variable(
         d; output_path = out, frames = 2, domain_lon = (0.5, nx + 0.5),
         domain_lat = (0.5, ny + 0.5))
     @test isfile(path) && filesize(path) > 0
@@ -38,22 +39,22 @@ const OCEAN_TMP_ANIM = joinpath(@__DIR__, "outputs", "_test_geoceanmodel_anim")
     @test argmin(abs.(depths)) == nz
     local val_at_level(i, k) = 1.0 + 1 + i + 10 * k
 
-    local src = GeoOceanModel._animation_source(d, :temperature, 4)
-    local frame = GeoOceanModel.extract_hydrodynamic_dataset(src; time_index = 1)
+    local src = TethysFlow._animation_source(d, :temperature, 4)
+    local frame = TethysFlow.extract_hydrodynamic_dataset(src; time_index = 1)
     @test frame.depths == depths
     @test frame.temperature[nx, ny, nz] == val_at_level(nx, nz)
     @test frame.temperature[nx, ny, 1] != frame.temperature[nx, ny, nz]
 
-    local speed_src = GeoOceanModel._animation_source(d, :speed, 4)
-    local speed_frame = GeoOceanModel.extract_hydrodynamic_dataset(
+    local speed_src = TethysFlow._animation_source(d, :speed, 4)
+    local speed_frame = TethysFlow.extract_hydrodynamic_dataset(
         speed_src; time_index = 1)
     @test size(speed_frame.u) == (nx, ny, nz)
     @test speed_frame.u[1, 1, 1] == val_at_level(1, 1)
     @test speed_frame.u[end, 1, 1] == val_at_level(nx, 1)
 
-    @test_throws Exception GeoOceanModel.animate_variable(
+    @test_throws Exception TethysFlow.animate_variable(
         d; variable = :salinity, output_path = out, frames = 2)
 
-    @test_throws Exception GeoOceanModel.animate_variable(
+    @test_throws Exception TethysFlow.animate_variable(
         joinpath(OCEAN_TMP_ANIM, "nope.zarr"); output_path = out, frames = 2)
 end

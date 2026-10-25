@@ -14,16 +14,16 @@
 #  notebook can say "NWA bathymetry is already in the lakehouse; TPXO9 needs 4.7 GB"
 #  before a reader spends the afternoon.
 #
-#  The lakehouse is one directory per half, as it is for the others: `lakehouse/GeoOceanModel`
-#  for this package's runs, `GeoDataSources.store_root()` -- `lakehouse/GeoData` -- for the
-#  shared products. A product in `lakehouse/GeoData` is shared by every half that uses it;
-#  a run in `lakehouse/GeoOceanModel/<run>` belongs to this half alone.
+#  The lakehouse is one directory per half, as it is for the others: `lakehouse/TethysFlow`
+#  for this package's runs, `GeoDataSources.store_root()` -- `lakehouse/Tethys` -- for the
+#  shared products. A product in `lakehouse/Tethys` is shared by every half that uses it;
+#  a run in `lakehouse/TethysFlow/<run>` belongs to this half alone.
 # ==============================================================================
 
 """
     ocean_store_root() -> String
 
-Where this half's runs are written: `projects/lakehouse/GeoOceanModel`, beside the other
+Where this half's runs are written: `projects/lakehouse/TethysFlow`, beside the other
 halves' directories. `MOVEMENT_STORE_ROOT` is not consulted here; `GEOCEAN_STORE_ROOT` is,
 and defaults to the same relative path so it resolves identically from a notebook and from a
 script.
@@ -31,7 +31,7 @@ script.
 function ocean_store_root()
     override = get(ENV, "GEOCEAN_STORE_ROOT", "")
     isempty(override) || return abspath(override)
-    return GeoData.lakehouse_dir("GeoOceanModel")
+    return Tethys.lakehouse_dir("TethysFlow")
 end
 
 """
@@ -63,7 +63,7 @@ function assimilation_status(opts::HydrodynamicOptions)
     # the register declares a tier-1 raw directory (`<store>/woa23_oxygen_00_0.25deg`) while
     # the driver reads the assimilated products the fetcher writes under `store_path("woa23")`.
     # Reporting the template would tell a reader the run is missing a file it never reads.
-    woa_dir = GeoDataSources.store_path("woa23")
+    woa_dir = Tethys.store_path("woa23")
     shared = [
         (:bathymetry, :bathymetry,
          "measured bathymetry, resolved by coverage (see `preferred_bathymetry_source`)"),
@@ -78,7 +78,7 @@ function assimilation_status(opts::HydrodynamicOptions)
             woa_dir
         else
             try
-                GeoDataSources.resolved_cache_path(key, opts.output_dir)
+                Tethys.resolved_cache_path(key, opts.output_dir)
             catch
                 "unresolved"
             end
@@ -102,7 +102,7 @@ function assimilation_status(opts::HydrodynamicOptions)
     return (
         run_dir = abspath(opts.output_dir),
         run_store = run_store,
-        shared_root = GeoDataSources.store_root(),
+        shared_root = Tethys.store_root(),
         inputs = rows,
         present = [r.role for r in rows if r.present],
         absent = [r.role for r in rows if !r.present && r.role != :output],

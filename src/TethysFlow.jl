@@ -1,22 +1,10 @@
-module GeoOceanModel
+"""
+    TethysFlow.jl
 
-# ==============================================================================
-#  GeoOceanModel
-#
-#  Phase 6 of the ParticleTracking split (SPLIT_PLAN.md 1). This package owns the physical
-#  ocean model: grid, bathymetry, vertical coordinates, hydrodynamics, tides, the forcing
-#  catalogue, and the ocean figures. It writes the handover described in
-#  `src/model/simulation_result.jl` and imports nothing from GeoLarvalTracking.
-#
-#  Everything here was moved from `ParticleTracking/src` unchanged, apart from the module name
-#  and the paths in `include`. Nothing was renamed: a reader looking for `build_shelf_grid` or
-#  `run_hydrodynamic_simulation!` finds it here under the same name, because renaming on a move
-#  is how a caller of the old name is told the function never existed.
-#
-#  The two packages share nothing but GeoData. Measured cross-domain call edges between the
-#  ocean half and the biology half of the original source: zero (SPLIT_PLAN.md 7d).
-# ==============================================================================
-
+Hydrodynamic simulation engine for coastal and shelf seas, integrated with Tethys.jl.
+"""
+module TethysFlow
+ 
 using
     Random,
     CairoMakie,
@@ -33,20 +21,18 @@ using
     TaylorSeries,
     Interpolations,
     Distributions,
-    GeoData,
-    GeoDataSources,
+    Tethys,
     OffsetArrays,
     Zarr
 
 # The provenance registry, as a submodule so its names do not have to be re-exported one by
-# one. Unchanged from ParticleTracking: this is the registry the run reports through.
+# one. This is the registry the run reports through.
 include("data/manifest.jl")
 using .Manifest
 
 using Oceananigans.Units
 using Oceananigans.Utils: prettytime
 using Oceananigans
-using GeoData
 using JSON3
 
 # ============================================================================
@@ -58,28 +44,78 @@ include("config/configuration.jl")
 include("data/open_data.jl")
 include("utils/architecture.jl")
 include("utils/tides.jl")
+include("geometry/projection.jl")
 include("data/grid_bathymetry.jl")
 include("data/vertical_grid.jl")
 include("model/hydrodynamic_model.jl")
 include("model/tidal_forcing.jl")
 include("model/simulation.jl")
 include("model/simulation_result.jl")
-include("output/geodata_output.jl")
+include("output/tethys_output.jl")
 include("output/visualization.jl")
-include("data/geodata/geodata_integration.jl")
+include("data/tethys_integration.jl")
 # The ocean-half run segments, as library code. Included last so every name its
 # bodies reach for is already defined; it adds the run driver the CLI dispatches to.
 include("driver.jl")
 include("assimilation.jl")
 include("data_assimilation.jl")
 
-export stitch_shelf_domains,
+# Coordinate Reference Systems & Projections (re-exported from Tethys / Tethys)
+export
+    AbstractProjection,
+    GeographicProjection,
+    CoordRefSystemsProjection,
+    UTMProjection,
+    LambertProjection,
+    MercatorProjection,
+    RotatedFrame,
+    ReprojectionGrid,
+    is_planar,
+    resolve_crs,
+    create_projection,
+    forward_project,
+    inverse_project,
+    grid_convergence_angle,
+    geographic_to_rotated,
+    rotated_to_geographic,
+    rotate_vector,
+    unrotate_vector,
+    rotate_vector_to_grid,
+    rotate_vector_to_geo,
+    reproject_to_geographic,
+    optimal_shelf_rotation_angle
+
+# Ocean Grid & Bathymetry
+export
+    build_shelf_grid,
+    build_immersed_grid_from_real_data,
+    build_hydrodynamic_model,
+    extract_grid_coordinates
+
+# Coriolis & Planar Dynamics
+export
+    ProjectedBetaPlane
+
+# Boundary & Sponge Layer Dynamics
+export
     CartesianSpongeMask,
-    qc_observations,
-    obs_indices,
-    nudging_tendency,
+    stitch_shelf_domains
+
+# Observation Nudging & Data Assimilation
+export
     optimal_interpolation,
+    build_observation_nudging,
+    nudging_tendency,
     load_observation_csv,
-    build_observation_nudging
+    obs_indices,
+    qc_observations
+
+# Configuration & Driver API
+export
+    HydrodynamicOptions,
+    HydrodynamicConfig,
+    load_configuration,
+    configuration_to_options,
+    TethysFlow
 
 end # module
