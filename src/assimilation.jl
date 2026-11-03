@@ -3,19 +3,19 @@
 # ==============================================================================
 #
 #  The ocean run does not read products from a path a caller typed. It resolves each input
-#  through `GeoDataSources`, which has one description per product: where it is published,
+#  through `Tethys`, which has one description per product: where it is published,
 #  which file it is, which licence it carries, and where its assimilated copy lives. This
 #  file is the ocean half's view of that register -- what this configuration will need, where
 #  each will land, and whether it is already there.
 #
 #  The register already decides *which* source a run gets, by coverage:
-#  `GeoDataSources.preferred_bathymetry_source` answers "which bathymetry for this domain",
+#  `Tethys.preferred_bathymetry_source` answers "which bathymetry for this domain",
 #  and the driver asks it. What this file adds is the ability to *ask before running*, so a
 #  notebook can say "NWA bathymetry is already in the lakehouse; TPXO9 needs 4.7 GB"
 #  before a reader spends the afternoon.
 #
 #  The lakehouse is one directory per half, as it is for the others: `lakehouse/TethysFlow`
-#  for this package's runs, `GeoDataSources.store_root()` -- `lakehouse/Tethys` -- for the
+#  for this package's runs, `Tethys.store_root()` -- `lakehouse/Tethys` -- for the
 #  shared products. A product in `lakehouse/Tethys` is shared by every half that uses it;
 #  a run in `lakehouse/TethysFlow/<run>` belongs to this half alone.
 # ==============================================================================
@@ -29,8 +29,10 @@ and defaults to the same relative path so it resolves identically from a noteboo
 script.
 """
 function ocean_store_root()
-    override = get(ENV, "GEOCEAN_STORE_ROOT", "")
-    isempty(override) || return abspath(override)
+    override = get(ENV, "TETHYS_LAKEHOUSE", get(ENV, "GEOCEAN_STORE_ROOT", get(ENV, "GEODATA_LAKEHOUSE", "")))
+    if !isempty(override)
+        return isdir(joinpath(override, "TethysFlow")) ? abspath(joinpath(override, "TethysFlow")) : abspath(override)
+    end
     return Tethys.lakehouse_dir("TethysFlow")
 end
 

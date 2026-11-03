@@ -18,15 +18,15 @@ const TethysFlow = TethysFlow
         @test utm isa CoordRefSystemsProjection
 
         # Center point projects to (0, 0) relative to grid center
-        x0, y0 = forward_project(utm, lon_c, lat_c)
+        x0, y0 = project_forward(utm, lon_c, lat_c)
         @test abs(x0) < 1e-4
         @test abs(y0) < 1e-4
 
         # Roundtrip test
         lon_test = -62.5
         lat_test = 44.3
-        x, y = forward_project(utm, lon_test, lat_test)
-        lon_rt, lat_rt = inverse_project(utm, x, y)
+        x, y = project_forward(utm, lon_test, lat_test)
+        lon_rt, lat_rt = project_inverse(utm, x, y)
         @test isapprox(lon_rt, lon_test, atol = 1e-7)
         @test isapprox(lat_rt, lat_test, atol = 1e-7)
 
@@ -53,15 +53,15 @@ const TethysFlow = TethysFlow
         @test is_planar(lambert) == true
 
         # Center point projects to near (0, 0)
-        x0, y0 = forward_project(lambert, lon_c, lat_c)
+        x0, y0 = project_forward(lambert, lon_c, lat_c)
         @test abs(x0) < 1e-4
         @test abs(y0) < 1e-4
 
         # Roundtrip test across Scotian Shelf
         test_pts = [(-64.0, 43.5), (-62.0, 45.0), (-60.0, 44.2)]
         for (lon_t, lat_t) in test_pts
-            x, y = forward_project(lambert, lon_t, lat_t)
-            lon_rt, lat_rt = inverse_project(lambert, x, y)
+            x, y = project_forward(lambert, lon_t, lat_t)
+            lon_rt, lat_rt = project_inverse(lambert, x, y)
             @test isapprox(lon_rt, lon_t, atol = 1e-6)
             @test isapprox(lat_rt, lat_t, atol = 1e-6)
         end
@@ -71,8 +71,8 @@ const TethysFlow = TethysFlow
         merc = MercatorProjection(lon_0 = lon_c, lat_ts = lat_c, lon_center = lon_c, lat_center = lat_c)
         @test is_planar(merc) == true
 
-        x, y = forward_project(merc, -62.0, 44.5)
-        lon_rt, lat_rt = inverse_project(merc, x, y)
+        x, y = project_forward(merc, -62.0, 44.5)
+        lon_rt, lat_rt = project_inverse(merc, x, y)
         @test isapprox(lon_rt, -62.0, atol = 1e-6)
         @test isapprox(lat_rt, 44.5, atol = 1e-6)
     end
@@ -87,15 +87,15 @@ const TethysFlow = TethysFlow
         @test rot_frame.angle_deg == 50.0
 
         # Center projects to (0, 0)
-        x0, y0 = forward_project(rot_frame, lon_c, lat_c)
+        x0, y0 = project_forward(rot_frame, lon_c, lat_c)
         @test abs(x0) < 1e-6
         @test abs(y0) < 1e-6
 
         # Roundtrip test
         lon_t = -61.5
         lat_t = 44.8
-        x, y = forward_project(rot_frame, lon_t, lat_t)
-        lon_rt, lat_rt = inverse_project(rot_frame, x, y)
+        x, y = project_forward(rot_frame, lon_t, lat_t)
+        lon_rt, lat_rt = project_inverse(rot_frame, x, y)
         @test isapprox(lon_rt, lon_t, atol = 1e-8)
         @test isapprox(lat_rt, lat_t, atol = 1e-8)
 
@@ -108,17 +108,17 @@ const TethysFlow = TethysFlow
         @test isapprox(v_rev, v_geo, atol = 1e-10)
     end
 
-    @testset "create_projection Factory Function" begin
-        p_utm = create_projection(projection = "utm", zone = 20, lon_center = lon_c, lat_center = lat_c)
+    @testset "build_projection Factory Function" begin
+        p_utm = build_projection(projection = "utm", zone = 20, lon_center = lon_c, lat_center = lat_c)
         @test p_utm isa CoordRefSystemsProjection
 
-        p_lcc = create_projection(projection = "lambert", lon_center = lon_c, lat_center = lat_c)
+        p_lcc = build_projection(projection = "lambert", lon_center = lon_c, lat_center = lat_c)
         @test p_lcc isa CoordRefSystemsProjection
 
-        p_rot = create_projection(projection = "rotated", rotation_deg = 50.0, lon_center = lon_c, lat_center = lat_c)
+        p_rot = build_projection(projection = "rotated", rotation_deg = 50.0, lon_center = lon_c, lat_center = lat_c)
         @test p_rot isa RotatedFrame
 
-        p_geo = create_projection(projection = "geographic")
+        p_geo = build_projection(projection = "geographic")
         @test p_geo isa GeographicProjection
     end
 
@@ -153,7 +153,7 @@ const TethysFlow = TethysFlow
     end
 
     @testset "build_shelf_grid with Projection" begin
-        proj = create_projection(
+        proj = build_projection(
             projection = "utm",
             zone = 20,
             lon_center = -63.0,
@@ -187,36 +187,77 @@ const TethysFlow = TethysFlow
 
     @testset "CoordRefSystems Direct CRS & WKT Resolution" begin
         # 1. Integer EPSG code
-        p_epsg_int = create_projection(crs = 32620, lon_center = lon_c, lat_center = lat_c)
+        p_epsg_int = build_projection(crs = 32620, lon_center = lon_c, lat_center = lat_c)
         @test p_epsg_int isa CoordRefSystemsProjection
         @test is_planar(p_epsg_int) == true
 
         # 2. String EPSG code
-        p_epsg_str = create_projection(projection = "EPSG:32620", lon_center = lon_c, lat_center = lat_c)
+        p_epsg_str = build_projection(projection = "EPSG:32620", lon_center = lon_c, lat_center = lat_c)
         @test p_epsg_str isa CoordRefSystemsProjection
 
         # 3. Numeric string
-        p_epsg_num = create_projection(projection = "32620", lon_center = lon_c, lat_center = lat_c)
+        p_epsg_num = build_projection(projection = "32620", lon_center = lon_c, lat_center = lat_c)
         @test p_epsg_num isa CoordRefSystemsProjection
 
         # 4. ESRI code
-        p_esri = create_projection(crs = "ESRI:102035", lon_center = 0.0, lat_center = 80.0)
+        p_esri = build_projection(crs = "ESRI:102035", lon_center = 0.0, lat_center = 80.0)
         @test p_esri isa CoordRefSystemsProjection
 
         # 5. WKT string
         wkt = "PROJCS[\"WGS 84 / UTM zone 20N\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433]],PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"latitude_of_origin\",0],PARAMETER[\"central_meridian\",-63],PARAMETER[\"scale_factor\",0.9996],PARAMETER[\"false_easting\",500000],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1],AUTHORITY[\"EPSG\",\"32620\"]]"
-        p_wkt = create_projection(crs = wkt, lon_center = lon_c, lat_center = lat_c)
+        p_wkt = build_projection(crs = wkt, lon_center = lon_c, lat_center = lat_c)
         @test p_wkt isa CoordRefSystemsProjection
 
         # 6. omerc alias
-        p_omerc = create_projection(projection = "omerc", lon_center = lon_c, lat_center = lat_c, rotation_deg = 45.0)
+        p_omerc = build_projection(projection = "omerc", lon_center = lon_c, lat_center = lat_c, rotation_deg = 45.0)
         @test p_omerc isa RotatedFrame
         @test p_omerc.angle_deg == 45.0
 
         # Verify roundtrip on resolved CRS projection
-        x, y = forward_project(p_epsg_int, lon_c + 0.1, lat_c + 0.1)
-        lon_back, lat_back = inverse_project(p_epsg_int, x, y)
+        x, y = project_forward(p_epsg_int, lon_c + 0.1, lat_c + 0.1)
+        lon_back, lat_back = project_inverse(p_epsg_int, x, y)
         @test isapprox(lon_back, lon_c + 0.1, atol = 1e-6)
         @test isapprox(lat_back, lat_c + 0.1, atol = 1e-6)
+    end
+
+    @testset "Projected forcing vectors use model-grid coordinates" begin
+        projection = RotatedFrame(lon_center = -62.5, lat_center = 43.5, angle_deg = 50.0)
+        T = TethysFlow.Tethys
+        lon = [-63.0, -62.0]
+        lat = [43.0, 44.0]
+        dims = (
+            T.Dimension(name = :lon, size = 2, coords = lon, units = "degrees_east"),
+            T.Dimension(name = :lat, size = 2, coords = lat, units = "degrees_north"),
+            T.Dimension(name = :time, size = 1, coords = [0.0]),
+        )
+        crs = T.CoordinateSystem(crs = "EPSG:4326")
+        coords = Dict(
+            :lon => T.GeoArray(lon, (dims[1],), crs),
+            :lat => T.GeoArray(lat, (dims[2],), crs),
+        )
+        source = T.GeoDataset(
+            Dict("u" => T.GeoArray(ones(2, 2, 1), dims, crs),
+                 "v" => T.GeoArray(zeros(2, 2, 1), dims, crs)),
+            coords, Dict(:lon => dims[1], :lat => dims[2], :time => dims[3]),
+            crs, Dict{String, Any}(), nothing, "projection_fixture")
+        rotated = T.transform_vector_dataset(
+            source, projection; pairs = ((:u, :v, :u_grid, :v_grid),))
+        u_grid = rotated.variables["u_grid"].data
+        v_grid = rotated.variables["v_grid"].data
+        expected_u, expected_v = rotate_vector_to_grid(projection, 1.0, 0.0, -63.0, 43.0)
+        @test isapprox(u_grid[1, 1, 1], expected_u; atol = 1e-12)
+        @test isapprox(v_grid[1, 1, 1], expected_v; atol = 1e-12)
+        @test isapprox(hypot(u_grid[1, 1, 1], v_grid[1, 1, 1]), 1.0; atol = 1e-12)
+
+        harmonics = TethysFlow.TidalVelocityHarmonics(
+            [:M2], [-63.0, -62.0], [43.0, 44.0],
+            ones(1, 2, 2), zeros(1, 2, 2), zeros(1, 2, 2), zeros(1, 2, 2), [1.0])
+        x0, y0 = project_forward(projection, -63.0, 43.0)
+        x1, y1 = project_forward(projection, -62.0, 44.0)
+        coefficients = TethysFlow.TidalCoefficientGrid(
+            harmonics, (x0, x1), (y0, y1); projection = projection, nx = 2, ny = 2)
+        tidal = TethysFlow.tidal_velocity_coefficients(coefficients)
+        @test isapprox(tidal.u(x0, y0, 0.0, 0.0), expected_u; atol = 1e-12)
+        @test isapprox(tidal.v(x0, y0, 0.0, 0.0), expected_v; atol = 1e-12)
     end
 end

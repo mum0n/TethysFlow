@@ -34,9 +34,9 @@ export
     ReprojectionGrid,
     is_planar,
     resolve_crs,
-    create_projection,
-    forward_project,
-    inverse_project,
+    build_projection,
+    project_forward,
+    project_inverse,
     grid_convergence_angle,
     geographic_to_rotated,
     rotated_to_geographic,
@@ -87,8 +87,6 @@ struct ProjectedBetaPlane{S, FT} <: AbstractRotation{S}
     βy     :: FT
 end
 
-# Backwards compatibility alias
-const RotatedBetaPlane = ProjectedBetaPlane
 
 """
     ProjectedBetaPlane(FT = Float64; latitude, angle_deg = 0.0, scheme = EnstrophyConserving())

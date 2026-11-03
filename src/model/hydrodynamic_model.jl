@@ -106,11 +106,11 @@ stepping, checkpointing and JLD2 output machinery and therefore only needs the m
 - `equation_of_state = TEOS10EquationOfState(reference_density = 1025)`. The library default
   is `reference_density = 1020`; this package works in the Boussinesq sense with ρ₀ = 1025.
   TEOS-10 is a full equation of state rather than the linearised form used previously, so
-  buoyancy and N² differ from the old `LinearEquationOfState` results — this is an accuracy
+  buoyancy and N² differ from the old `LinearEquationOfState` results  -  this is an accuracy
   improvement, not a like-for-like swap.
 - `coriolis` is left at the library default, `HydrostaticSphericalCoriolis`. The previous
   manual builder used `FPlane(latitude = 44.5)`, which freezes f and omits the β term; over a
-  42–47.5 °N domain the β term is not negligible, so the spherical form is more appropriate.
+  42-47.5 °N domain the β term is not negligible, so the spherical form is more appropriate.
 - `closure` defaults to `VerticalScalarDiffusivity` with the caller's `ν`/`κ`, matching the
   previous behaviour. Pass `closure = :catke` for the library's prognostic NEMO-TKE closure.
 - `free_surface = SplitExplicitFreeSurface(grid; substeps = 45)`. The previous builder used
@@ -146,17 +146,26 @@ faces is not a wrong answer, it is an answer about the wrong places. The field's
 array has the same size and offsets as the relaxed field's own, so the kernel's index
 arithmetic is the same for both.
 
-`source` is called with `z` NEGATIVE DOWN, the model's convention and the one the
-boundary interpolators are built in. A source that is only callable as
+`source` is queried at geographic `(lon, lat)` coordinates even when the model grid is
+planar; the configured projection is inverse-applied to grid points first. The stored
+boundary components are already in model-grid orientation. `z` is NEGATIVE DOWN, the
+model's convention and the one the boundary interpolators use. A source callable only as
 `(lon, lat, z, t)` is called with `t = 0`: the boundary velocity is a climatology, and
 the tidal signal is supplied separately by the tidal forcing.
 """
-function _materialise_boundary_velocity(grid, source, face::Symbol)
+function _materialise_boundary_velocity(grid, source, face::Symbol; projection = nothing)
     fld = face === :x ? XFaceField(grid) : YFaceField(grid)
+    geographic_query = projection !== nothing && is_planar(projection)
     if applicable(source, 0.0, 0.0, 0.0)
-        set!(fld, (x, y, z) -> Float64(source(x, y, z)))
+        set!(fld, (x, y, z) -> begin
+            lon, lat = geographic_query ? project_inverse(projection, x, y) : (x, y)
+            Float64(source(lon, lat, z))
+        end)
     elseif applicable(source, 0.0, 0.0, 0.0, 0.0)
-        set!(fld, (x, y, z) -> Float64(source(x, y, z, 0.0)))
+        set!(fld, (x, y, z) -> begin
+            lon, lat = geographic_query ? project_inverse(projection, x, y) : (x, y)
+            Float64(source(lon, lat, z, 0.0))
+        end)
     else
         error(
             "A boundary velocity must be callable as (lon, lat, z) or (lon, lat, z, t) " *
@@ -170,11 +179,14 @@ function build_hydrodynamic_model(
     Δt::Real = 120.0,
     surface_wind_stress_x = 0.0001,
     surface_wind_stress_y = 0.0,
+    surface_wind_stress_frame::Symbol = :geographic,
     surface_heat_flux = 0.0,
     tidal_forcing::Union{Nothing, NamedTuple} = nothing,
     sponge_forcing::Union{Nothing, NamedTuple} = nothing,
     ν::Real = 1e-2,
     κ::Real = 1e-2,
+    horizontal_viscosity::Real = 100.0,
+    horizontal_diffusivity::Real = 100.0,
     closure = nothing,
     closure_scheme = nothing,
     tracers::Tuple = (:T, :S),
@@ -217,35 +229,43 @@ function build_hydrodynamic_model(
         )
     end
 
+    arch = architecture(grid)
+    eff_heat_flux = on_architecture(arch, surface_heat_flux)
+
     # Conversion factor from W/m^2 to kinematic heat flux (m*K/s): Q / (rho0 * cp)
     rho0_cp = 1025.0 * 3991.0
 
     # Surface heat flux boundary condition
-    T_flux_bc = if surface_heat_flux isa Function && applicable(surface_heat_flux, 0.0, 0.0, 0.0, 0.0)
-        FluxBoundaryCondition(KinematicSurfaceHeatFlux(surface_heat_flux, rho0_cp), field_dependencies = :T)
-    elseif surface_heat_flux isa Function
-        if applicable(surface_heat_flux, 0.0, 0.0, 0.0, 0.0, 0.0)
+    T_flux_bc = if eff_heat_flux isa Function && applicable(eff_heat_flux, 0.0, 0.0, 0.0, 0.0)
+        FluxBoundaryCondition(KinematicSurfaceHeatFlux(eff_heat_flux, rho0_cp), field_dependencies = :T)
+    elseif eff_heat_flux isa Function
+        if applicable(eff_heat_flux, 0.0, 0.0, 0.0, 0.0, 0.0)
             FluxBoundaryCondition(
-                (x, y, z, t, T) -> -surface_heat_flux(x, y, z, t, T) / rho0_cp,
+                (x, y, z, t, T) -> -eff_heat_flux(x, y, z, t, T) / rho0_cp,
                 field_dependencies = :T,
             )
         else
             FluxBoundaryCondition(
-                (x, y, z, t) -> -surface_heat_flux(x, y, t) / rho0_cp,
+                (x, y, z, t) -> -eff_heat_flux(x, y, t) / rho0_cp,
             )
         end
-    elseif surface_heat_flux isa AbstractMatrix
-        FluxBoundaryCondition(-surface_heat_flux ./ rho0_cp)
+    elseif eff_heat_flux isa AbstractMatrix
+        FluxBoundaryCondition(-eff_heat_flux ./ rho0_cp)
     else
-        FluxBoundaryCondition(-Float64(surface_heat_flux) / rho0_cp)
+        FluxBoundaryCondition(-Float64(eff_heat_flux) / rho0_cp)
     end
 
     # Geographic center coordinates for local vector rotation
     lon_c = isnothing(lon_range) ? 0.0 : 0.5 * (Float64(lon_range[1]) + Float64(lon_range[2]))
     lat_c = isnothing(lat_range) ? 0.0 : 0.5 * (Float64(lat_range[1]) + Float64(lat_range[2]))
 
-    # Rotate surface wind stress vectors into computational grid axes when projected
-    eff_wind_x, eff_wind_y = if projection !== nothing && is_planar(projection) &&
+    surface_wind_stress_frame in (:geographic, :model_grid) || error(
+        "surface_wind_stress_frame must be :geographic or :model_grid.")
+    # Scalar inputs from older callers are geographic by default. The ingestion pipeline
+    # labels persisted time-series stresses :model_grid because it rotated them at every
+    # source-grid point before writing the Lakehouse sidecar.
+    eff_wind_x, eff_wind_y = if surface_wind_stress_frame === :geographic &&
+                                projection !== nothing && is_planar(projection) &&
                                 surface_wind_stress_x isa Real && surface_wind_stress_y isa Real
         rotate_vector_to_grid(
             projection, Float64(surface_wind_stress_x), Float64(surface_wind_stress_y), lon_c, lat_c
@@ -253,6 +273,9 @@ function build_hydrodynamic_model(
     else
         (surface_wind_stress_x, surface_wind_stress_y)
     end
+
+    eff_wind_x = on_architecture(arch, eff_wind_x)
+    eff_wind_y = on_architecture(arch, eff_wind_y)
 
     u_bc = eff_wind_x isa BoundaryCondition ? eff_wind_x : FluxBoundaryCondition(eff_wind_x)
     v_bc = eff_wind_y isa BoundaryCondition ? eff_wind_y : FluxBoundaryCondition(eff_wind_y)
@@ -355,14 +378,14 @@ function build_hydrodynamic_model(
                 boundary_velocities.u
             else
                 u_ref
-            end, :x)
+            end, :x; projection = projection)
         v_target = _materialise_boundary_velocity(
             grid,
             if !isnothing(boundary_velocities) && haskey(boundary_velocities, :v)
                 boundary_velocities.v
             else
                 v_ref
-            end, :y)
+            end, :y; projection = projection)
 
         # Disentangle the upstream inflow momentum forcing from the lateral radiation sponge.
         inflow_sponge_mask = CartesianSpongeMask(
@@ -548,7 +571,16 @@ function build_hydrodynamic_model(
     else
         eff_closure
     end
-    horizontal_closure = HorizontalScalarDiffusivity(ν = 100.0, κ = 100.0)
+    # Prescribed horizontal eddy viscosity/diffusivity. The values are configuration, not
+    # closure internals: the Scotian Shelf break is an unstratified barotropic shelf edge at
+    # 2 km resolution, and the near-bottom jet that develops over its step is a grid-scale
+    # shear mode. A stratification-keyed closure (Smagorinsky/KPP) switches itself off in
+    # exactly that column. 100 m^2/s -- the value this was hard-coded to -- is the molecular-
+    # scale floor of a 2 km ocean model and does not damp the mode.
+    horizontal_closure = HorizontalScalarDiffusivity(
+        ν = Float64(horizontal_viscosity),
+        κ = Float64(horizontal_diffusivity)
+    )
     active_closure = (vertical_closure, horizontal_closure)
 
     kwargs = Dict{Symbol, Any}(
@@ -676,7 +708,7 @@ function _grid_tracer_query(itp, lon, lat, depth; projection = nothing)
 
     if projection !== nothing && is_planar(projection)
         return (x, y, z) -> begin
-            lon_pt, lat_pt = inverse_project(projection, x, y)
+            lon_pt, lat_pt = project_inverse(projection, x, y)
             itp(
                 to_iz(clamp(-Float64(z), lo_z, hi_z)),
                 to_iy(clamp(Float64(lat_pt), lo_y, hi_y)),
@@ -749,7 +781,7 @@ permutations that put each of the three axes in ascending order.
 The depth convention is decided from the data rather than the filename: WOA23 ships both
 (the 1-degree files are negative-down, the 0.25-degree files positive-down), so negating
 unconditionally turns one kind upside down and the boundary sampler then maps every query
-depth to the wrong level — a flattened profile that looks well-formed.
+depth to the wrong level  -  a flattened profile that looks well-formed.
 """
 function _woa_sorted_axes(lon_raw::AbstractVector{<:Real},
                           lat_raw::AbstractVector{<:Real},
@@ -774,7 +806,7 @@ missingness mapped to `NaN`.
 Both formats are accepted because a fetched product is written in whichever form the run that
 fetched it chose: the central store holds `woa23_*.zarr`, while a per-run download under a
 run's own `inputs/` is a NetCDF file. The one reader serves both, so a run never fails because
-a product happens to be on disk in the other format — the failure that a fresh installation
+a product happens to be on disk in the other format  -  the failure that a fresh installation
 hit, with the data present and unreadable.
 """
 function read_woa_variable(filepath::AbstractString, varname::AbstractString; month::Int = 1)
@@ -876,7 +908,7 @@ end
     is_zarr_store(path::AbstractString) -> Bool
 
 Whether `path` names a Zarr store: a directory whose metadata says so. The `.zarr` suffix is
-the convention, not the test — a directory with `.zarray` in it is read as an array store.
+the convention, not the test  -  a directory with `.zarray` in it is read as an array store.
 """
 function is_zarr_store(path::AbstractString)
     isdir(path) || return false
@@ -892,7 +924,7 @@ A Zarr array carries no dimension *names*, so the layout is resolved from the ax
 each of the variable's dimensions is matched, by length, to the coordinate variable of the same
 length. Matching by length is exact here because lon, lat and depth all differ in length, and it
 means a file written in a different dimension order is still read correctly rather than
-permuted as if it were the expected one — the same class of error the NetCDF branch guards
+permuted as if it were the expected one  -  the same class of error the NetCDF branch guards
 against with `dimnames`.
 """
 function _read_woa_variable_zarr(filepath::AbstractString, varname::AbstractString; month::Int = 1)
@@ -1166,9 +1198,6 @@ function _temperature_to_celsius_offset(units::AbstractString)
     )
 end
 
-# Backward compatibility alias
-const _temperature_offset_k = _temperature_to_celsius_offset
-
 
 """
     build_boundary_tracer_interpolators(T_path, S_path; T_name, S_name)
@@ -1437,9 +1466,9 @@ end
 
 Set physically plausible initial `T` and `S` profiles on `model`.
 
-Temperature is built from up to four overlapping components — a surface value, a
+Temperature is built from up to four overlapping components  -  a surface value, a
 bottom value, a cold-intermediate-layer (CIL) minimum, and a continental-slope
-minimum — with `temperature_gradient` setting the thermocline sharpness. Salinity is
+minimum  -  with `temperature_gradient` setting the thermocline sharpness. Salinity is
 constant unless a function is supplied.
 
 All components are optional: with none given, a linear profile from

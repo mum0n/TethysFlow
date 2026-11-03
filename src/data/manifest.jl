@@ -3,7 +3,7 @@
 
 Provenance registry for every physical input a run consumes.
 
-This module re-exports the provenance framework from `GeoDataSources`. Dataset
+This module re-exports the provenance framework from `Tethys`. Dataset
 declarations, the fetch dispatch table, and the fetchers themselves live there; a
 TethysFlow run adds nothing to that machinery and should not carry a copy of it.
 """

@@ -46,6 +46,76 @@ output_zarr_path(output_dir::AbstractString, name::AbstractString = "hydrodynami
     joinpath(output_dir, name * ".zarr")
 
 """
+    build_zarr_compressor(;
+        codec::AbstractString = "zstd",
+        level::Integer = 7,
+        shuffle::Integer = 1
+    ) -> Zarr.BloscCompressor
+
+Construct a Blosc compressor for Zarr dataset serialization.
+
+# Inputs
+- `codec::AbstractString`: Blosc compressor name (`"zstd"`, `"lz4"`, `"zlib"`, `"snappy"`).
+- `level::Integer`: Compression level (1 to 9).
+- `shuffle::Integer`: Filter shuffle mode (0: none, 1: byte shuffle, 2: bit shuffle).
+
+# Outputs
+- `Zarr.BloscCompressor`: Configured Blosc compressor instance.
+"""
+function build_zarr_compressor(;
+    codec::AbstractString = "zstd",
+    level::Integer = 7,
+    shuffle::Integer = 1
+)::Zarr.BloscCompressor
+    cname = lowercase(strip(codec))
+    valid_codecs = ("zstd", "lz4", "zlib", "snappy", "blosclz")
+    if cname ∉ valid_codecs
+        @warn "Unsupported compression codec '$(codec)'; defaulting to 'zstd'."
+        cname = "zstd"
+    end
+    clevel = min(max(Int(level), 0), 9)
+    shuf = min(max(Int(shuffle), 0), 2)
+    return Zarr.BloscCompressor(0, clevel, cname, shuf)
+end
+
+"""
+    _update_existing_store_compressor!(
+        store_path::AbstractString,
+        field_names::Vector{String},
+        compressor::Zarr.BloscCompressor
+    )
+
+Update compressor configuration in `.zarray` files for active variables in an existing
+Zarr store, ensuring that subsequent chunks are compressed with the updated codec and level.
+"""
+function _update_existing_store_compressor!(
+    store_path::AbstractString,
+    field_names::Vector{String},
+    compressor::Zarr.BloscCompressor
+)
+    for name in field_names
+        zarr_file = joinpath(store_path, name, ".zarray")
+        if isfile(zarr_file)
+            try
+                meta = JSON3.read(read(zarr_file, String), Dict{String, Any})
+                if haskey(meta, "compressor") && meta["compressor"] isa Dict
+                    meta["compressor"]["id"] = "blosc"
+                    meta["compressor"]["cname"] = compressor.cname
+                    meta["compressor"]["clevel"] = compressor.clevel
+                    meta["compressor"]["shuffle"] = compressor.shuffle
+                    open(zarr_file, "w") do f
+                        JSON3.write(f, meta)
+                    end
+                end
+            catch err
+                @warn "Could not update .zarray compressor for $(name): $(err)"
+            end
+        end
+    end
+end
+
+
+"""
     GeodataOutputCallback
 
 An Oceananigans `Callback` that writes the ocean state into a store at each firing.
@@ -55,7 +125,7 @@ rather than holding its history in memory and losing it on a crash.
 
 That store is a **Tethys** store -- the variables are a `GeoDataset`'s, with their axes and
 dimension records, opened once at the first output and written into slice by slice. This is
-what makes a reader use `geoload` and the dataset's own `.variables`/`.dims` rather than
+what makes a reader use `load_dataset` and the dataset's own `.variables`/`.dims` rather than
 walking Zarr: an earlier version wrote each interval to `T/<m>/`, and Tethys's Zarr reader
 discovers variables as the root group's *child arrays*, so that store opened as an empty
 dataset and every consumer -- the larval half and the figures -- hand-rolled its own reads.
@@ -83,44 +153,138 @@ mutable struct GeodataOutputCallback
     # Optional maximum water depth (m) to archive. Depths deeper than this (e.g. > 400 m)
     # are subsampled out to reduce vertical array volume by up to 50% for epipelagic larval drift.
     max_save_depth::Float64
+    # Optional Blosc compressor configured for Zarr array creation and appending.
+    compressor::Any
+    # Optional coordinate projection for reprojection from planar computational grid
+    # to geographic WGS84 coordinates.
+    projection::Any
+    # Cached bilinear mapping lattice for geographic reprojection
+    reprojection_grid::Union{Tethys.ReprojectionGrid, Nothing}
+    # Precomputed grid convergence angle rotation matrices for velocity vectors
+    cos_gamma::Union{Matrix{Float32}, Nothing}
+    sin_gamma::Union{Matrix{Float32}, Nothing}
+    target_lons::Union{Vector{Float64}, Nothing}
+    target_lats::Union{Vector{Float64}, Nothing}
 end
 
 """
-    GeodataOutputCallback(output_dir, model; fields = ("u","v","w","T"), resume = false,
-                          spinup_seconds = 0.0, max_save_depth = Inf)
+    GeodataOutputCallback(output_dir, interval, model; fields = ("u","v","w","T"),
+                          resume = false, spinup_seconds = 0.0, max_save_depth = Inf,
+                          compressor = nothing, projection = nothing, domain_lon = nothing,
+                          domain_lat = nothing, target_lons = nothing, target_lats = nothing,
+                          reproject = true)
 
 Construct the output writer for one run. A fresh run clears the store and starts at slice 0.
-`resume = true` keeps the store and continues from however many slices it already holds, so an
-extended/interrupted run appends to its own output instead of re-downloading nothing and
-overwriting the interval it already wrote.
+`resume = true` keeps the store and continues from however many slices it already holds.
+When `projection` is supplied for a planar model and `reproject = true`, flow fields and
+immersed seabed bathymetry are reprojected onto a regular geographic WGS84 `(lon, lat)` grid,
+and velocity vectors are unrotated to true geographic East and North directions.
 """
 function GeodataOutputCallback(output_dir::AbstractString, interval::Real,
                                model; fields::Tuple = ("u", "v", "w", "T"),
                                resume::Bool = false, spinup_seconds::Real = 0.0,
-                               max_save_depth::Real = Inf)
+                               max_save_depth::Real = Inf,
+                               compressor = nothing,
+                               projection = nothing,
+                               domain_lon = nothing,
+                               domain_lat = nothing,
+                               target_lons = nothing,
+                               target_lats = nothing,
+                               reproject::Bool = true)
     isdir(output_dir) || mkpath(output_dir)
     store = output_zarr_path(output_dir)
     if !resume && ispath(store)
         rm(store; recursive = true, force = true)   # a fresh run overwrites its own output
     end
-    # The store directory is NOT created here. It is created by the save at the first
-    # output, when the grid axes and the field shapes are known.
-    #
-    # Creating it here made "the run has not saved anything yet" and "the run is not
-    # saving" look identical from the outside: an empty `hydrodynamics.zarr` beside a
-    # running process reads as a failure, and it is what a run that has not yet reached
-    # its first output interval -- or one still inside its spin-up -- looks like. The
-    # absence of the directory is the honest signal, and `store_interval_count` already
-    # treats a missing store as zero intervals.
 
     start = 1
     if resume
         start = TethysFlow.store_interval_count(store) + 1
     end
+
+    rep_grid = nothing
+    cos_g = nothing
+    sin_g = nothing
+    tlons = nothing
+    tlats = nothing
+
+    base_g = if model !== nothing && hasproperty(model, :grid)
+        hasproperty(model.grid, :underlying_grid) ? model.grid.underlying_grid : model.grid
+    else
+        nothing
+    end
+    is_planar_grid = base_g !== nothing && base_g isa Oceananigans.Grids.RectilinearGrid
+
+    if reproject && is_planar_grid && projection !== nothing && Tethys.is_planar(projection)
+        if target_lons !== nothing && target_lats !== nothing
+            tlons = Float64.(collect(target_lons))
+            tlats = Float64.(collect(target_lats))
+        else
+            bounds_lon, bounds_lat = if domain_lon !== nothing && domain_lat !== nothing
+                (Float64(domain_lon[1]), Float64(domain_lon[2])),
+                (Float64(domain_lat[1]), Float64(domain_lat[2]))
+            else
+                grid_geographic_bounds(model.grid; projection = projection)
+            end
+
+            raw_ax_init = _field_arrays(model)
+            nx_raw = length(raw_ax_init.x)
+            ny_raw = length(raw_ax_init.y)
+            dx = nx_raw > 1 ? abs(raw_ax_init.x[end] - raw_ax_init.x[1]) / (nx_raw - 1) : 2000.0
+            dy = ny_raw > 1 ? abs(raw_ax_init.y[end] - raw_ax_init.y[1]) / (ny_raw - 1) : 2000.0
+
+            mid_lat = 0.5 * (bounds_lat[1] + bounds_lat[2])
+            dlon = dx / (111_320.0 * cos(deg2rad(mid_lat)))
+            dlat = dy / 111_132.0
+
+            n_lon = max(2, round(Int, abs(bounds_lon[2] - bounds_lon[1]) / dlon) + 1)
+            n_lat = max(2, round(Int, abs(bounds_lat[2] - bounds_lat[1]) / dlat) + 1)
+
+            tlons = collect(range(min(bounds_lon...), max(bounds_lon...), length = n_lon))
+            tlats = collect(range(min(bounds_lat...), max(bounds_lat...), length = n_lat))
+        end
+
+        raw_ax_init = _field_arrays(model)
+        nx_raw = length(raw_ax_init.x)
+        ny_raw = length(raw_ax_init.y)
+        dx_grid = nx_raw > 1 ? abs(raw_ax_init.x[end] - raw_ax_init.x[1]) / (nx_raw - 1) : 2000.0
+        dy_grid = ny_raw > 1 ? abs(raw_ax_init.y[end] - raw_ax_init.y[1]) / (ny_raw - 1) : 2000.0
+        extent_x = dx_grid * nx_raw
+        extent_y = dy_grid * ny_raw
+
+        rep_grid = Tethys.ReprojectionGrid(projection, tlons, tlats;
+                                           extent_x = extent_x,
+                                           extent_y = extent_y)
+
+        nx_t = length(tlons)
+        ny_t = length(tlats)
+        cos_g = Matrix{Float32}(undef, nx_t, ny_t)
+        sin_g = Matrix{Float32}(undef, nx_t, ny_t)
+        for j in 1:ny_t, i in 1:nx_t
+            gamma = Tethys.grid_convergence_angle(projection, tlons[i], tlats[j])
+            rad = deg2rad(Float32(gamma))
+            cos_g[i, j] = cos(rad)
+            sin_g[i, j] = sin(rad)
+        end
+    end
+
     return GeodataOutputCallback(store, output_dir, collect(String.(fields)), Ref(start),
                                  nothing, nothing, Float64(interval), Float64(spinup_seconds),
-                                 Float64(max_save_depth))
+                                 Float64(max_save_depth), compressor, projection,
+                                 rep_grid, cos_g, sin_g, tlons, tlats)
 end
+
+# Checkpoint round-trips. Oceananigans' `restore_prognostic_state!` recurses through the
+# callbacks when a run picks up a checkpoint and asks every callback func to replay its own
+# state; the base package only knows `Nothing` and its own types, so a run resumed from a
+# checkpoint with one of these callbacks attached died in a MethodError before the first
+# time step. The callback carries no simulational prognostic state of its own -- the store
+# records the write position -- so restore is an honest no-op. Both signatures are defined
+# because older checkpoints serialise the callback struct itself, while current
+# Oceananigans stores whatever `prognostic_state` returns (here, nothing).
+Oceananigans.prognostic_state(::GeodataOutputCallback) = nothing
+Oceananigans.restore_prognostic_state!(::GeodataOutputCallback, ::Nothing) = nothing
+Oceananigans.restore_prognostic_state!(::GeodataOutputCallback, ::GeodataOutputCallback) = nothing
 
 """
     _interval_count(sim, cb) -> Int
@@ -162,14 +326,17 @@ in-memory dictionary and nothing on disk: the store was written without its seab
 a reader that went looking for it found nothing.
 """
 function _build_store_dataset(store::AbstractString, ax, names::Vector{String}, nt::Int,
-                              model)
+                              model; compressor = nothing,
+                              reprojection_grid = nothing,
+                              raw_ax = nothing)
+    is_reprojected = reprojection_grid !== nothing
     is_planar_grid = false
-    if model !== nothing && hasproperty(model, :grid)
+    if !is_reprojected && model !== nothing && hasproperty(model, :grid)
         base = hasproperty(model.grid, :underlying_grid) ? model.grid.underlying_grid : model.grid
         is_planar_grid = base isa Oceananigans.Grids.RectilinearGrid
     end
 
-    crs_str = is_planar_grid ? "Projected" : "EPSG:4326"
+    crs_str = (is_planar_grid && !is_reprojected) ? "Projected" : "EPSG:4326"
     crs = Tethys.CoordinateSystem(crs = crs_str)
     nx, ny, nz = length(ax.x), length(ax.y), length(ax.z)
 
@@ -177,12 +344,12 @@ function _build_store_dataset(store::AbstractString, ax, names::Vector{String}, 
         name = name, size = length(coords), coords = coords,
         units = units, standard_name = std, dim_type = dim_type)
 
-    dl = if is_planar_grid
+    dl = if is_planar_grid && !is_reprojected
         axe(:x, ax.x, "m", "projection_x_coordinate", Tethys.DIM_SPATIAL)
     else
         axe(:lon, ax.x, "degrees_east", "longitude", Tethys.DIM_SPATIAL)
     end
-    dt = if is_planar_grid
+    dt = if is_planar_grid && !is_reprojected
         axe(:y, ax.y, "m", "projection_y_coordinate", Tethys.DIM_SPATIAL)
     else
         axe(:lat, ax.y, "degrees_north", "latitude", Tethys.DIM_SPATIAL)
@@ -190,13 +357,14 @@ function _build_store_dataset(store::AbstractString, ax, names::Vector{String}, 
     dz = axe(:depth, ax.z, "m", "depth", Tethys.DIM_PARAMETRIC)
     tim = axe(:time, Float64.(1:nt), "s", "time", Tethys.DIM_TEMPORAL)
 
-    dims = if is_planar_grid
+    dims = if is_planar_grid && !is_reprojected
         Dict{Symbol, Tethys.Dimension}(:x => dl, :y => dt, :depth => dz, :time => tim)
     else
         Dict{Symbol, Tethys.Dimension}(:lon => dl, :lat => dt, :depth => dz, :time => tim)
     end
 
-    dim_names = is_planar_grid ? ["x", "y", "depth", "time"] : ["lon", "lat", "depth", "time"]
+    dim_names = (is_planar_grid && !is_reprojected) ?
+        ["x", "y", "depth", "time"] : ["lon", "lat", "depth", "time"]
 
     chunk_t = min(nt, 24)
     target_chunks = (nx, ny, nz, chunk_t)
@@ -204,23 +372,32 @@ function _build_store_dataset(store::AbstractString, ax, names::Vector{String}, 
     variables = [(name, (nx, ny, nz, nt), dim_names, target_chunks)
                  for name in names]
 
-    attrs = run_metadata(model)
-    if is_planar_grid
+    attrs = run_metadata(model; reprojection_grid = reprojection_grid, raw_ax = raw_ax)
+    for (k, v) in Tethys.coordinate_system_attributes(crs)
+        attrs[k] = v
+    end
+    if is_planar_grid && !is_reprojected
         attrs["grid_type"] = "planar_rectilinear"
         attrs["grid_units"] = "m"
+    elseif is_reprojected
+        attrs["grid_type"] = "geographic_reprojected"
+        attrs["grid_units"] = "degrees"
+        attrs["source_grid_type"] = "planar_rectilinear"
+        attrs["reprojected_to"] = "EPSG:4326"
     end
 
     Tethys.create_zarr_template(String(store);
                                  dims = dims,
                                  attrs = attrs,
-                                 variables = variables)
+                                 variables = variables,
+                                 compressor = compressor)
 
     # Reopened for write, because the callback writes into this dataset's arrays:
-    # `geoload` defaults to read-only, and of the Zarr modes only `"w"` hands out a
+    # `load_dataset` defaults to read-only, and of the Zarr modes only `"w"` hands out a
     # writeable array here. It does not truncate -- a second `"w"` open appends, which is
     # checked explicitly, because a writer that silently cleared its earlier intervals
     # would produce a run whose first slice is missing.
-    return Tethys.geoload(String(store); backend = :zarr, mode = "w")
+    return Tethys.load_dataset(String(store); backend = :zarr, mode = "w")
 end
 
 """
@@ -296,7 +473,7 @@ end
 The grid's **interior** cell centres as geographic `(lon, lat, depth)`.
 
 The halo must be stripped: writing the halo-inclusive coordinate array would put store index
-`i` at halo position `i` rather than interior position `i` — a silent displacement of the whole
+`i` at halo position `i` rather than interior position `i`  -  a silent displacement of the whole
 field with a shape that still looks fine. Rather than slice the halo range here, this delegates
 to `extract_grid_coordinates`, the project's tested halo-stripped extractor in degrees and
 metres, so the store's coordinates are the model's real interior centres by construction.
@@ -318,8 +495,13 @@ function _field_arrays(model)
     iy = (base.Hy + 1):(base.Hy + base.Ny)
     x = Float64.(_host_copy(base.xᶜᵃᵃ)[ix])
     y = Float64.(_host_copy(base.yᵃᶜᵃ)[iy])
-    z = [Float64(Oceananigans.Grids.znode(k, base, Oceananigans.Grids.Center()))
-         for k in 1:base.Nz]
+    # The vertical centres must come from one whole-array host transfer, matching x/y above:
+    # calling `znode(k, base, Center())` per level scalar-indexes the GPU-side node offset
+    # array on every call and aborts with "Scalar indexing is disallowed" the first time this
+    # runs on a GPU model built on a planar grid (geographic `LatitudeLongitudeGrid` models
+    # never reach this branch). On the vertical discretization the centre nodes are indexed
+    # `1:Nz` directly (halos live at `1-Hz:0` and `Nz+1:Nz+Hz`), verified against `znode`.
+    z = Float64.(_host_copy(base.z.cᵃᵃᶜ)[1:base.Nz])
     return (x = x, y = y, z = z)
 end
 
@@ -329,7 +511,12 @@ function (cb::GeodataOutputCallback)(sim::Oceananigans.Simulation)
     if t < cb.spinup_seconds
         return nothing
     end
-    m = cb.written[]
+    m = if cb.interval > 0.0
+        calc_m = max(1, round(Int, (t - cb.spinup_seconds) / cb.interval) + 1)
+        max(calc_m, cb.written[])
+    else
+        cb.written[]
+    end
 
     # The interior cell centres, resolved from the model's own grid, so the store states where
     # its cells are on Earth rather than leaving a reader to guess from an index.
@@ -343,7 +530,11 @@ function (cb::GeodataOutputCallback)(sim::Oceananigans.Simulation)
         1:length(raw_ax.z)
     end
     isempty(z_indices) && (z_indices = 1:length(raw_ax.z))
-    ax = (x = raw_ax.x, y = raw_ax.y, z = raw_ax.z[z_indices])
+    ax = if cb.reprojection_grid !== nothing && cb.target_lons !== nothing && cb.target_lats !== nothing
+        (x = cb.target_lons, y = cb.target_lats, z = raw_ax.z[z_indices])
+    else
+        (x = raw_ax.x, y = raw_ax.y, z = raw_ax.z[z_indices])
+    end
 
     fields = Dict{String, Any}()
     for name in cb.field_names
@@ -357,42 +548,95 @@ function (cb::GeodataOutputCallback)(sim::Oceananigans.Simulation)
         fields[name] = length(z_indices) < length(raw_ax.z) ? centred[:, :, z_indices] : centred
     end
 
+    if cb.reprojection_grid !== nothing
+        # Reproject velocity fields and unrotate them to true East/North directions
+        has_u = haskey(fields, "u")
+        has_v = haskey(fields, "v")
+        if has_u && has_v && cb.cos_gamma !== nothing && cb.sin_gamma !== nothing
+            u_geo = Tethys.reproject_to_geographic(
+                fields["u"], raw_ax.x, raw_ax.y, cb.reprojection_grid; fill_value = NaN32
+            )
+            v_geo = Tethys.reproject_to_geographic(
+                fields["v"], raw_ax.x, raw_ax.y, cb.reprojection_grid; fill_value = NaN32
+            )
+            nz_sub = size(u_geo, 3)
+            for k in 1:nz_sub
+                @views u_k = u_geo[:, :, k]
+                @views v_k = v_geo[:, :, k]
+                u_rot = @. u_k * cb.cos_gamma - v_k * cb.sin_gamma
+                v_rot = @. u_k * cb.sin_gamma + v_k * cb.cos_gamma
+                u_geo[:, :, k] = u_rot
+                v_geo[:, :, k] = v_rot
+            end
+            fields["u"] = u_geo
+            fields["v"] = v_geo
+        elseif has_u
+            fields["u"] = Tethys.reproject_to_geographic(
+                fields["u"], raw_ax.x, raw_ax.y, cb.reprojection_grid; fill_value = NaN32
+            )
+        elseif has_v
+            fields["v"] = Tethys.reproject_to_geographic(
+                fields["v"], raw_ax.x, raw_ax.y, cb.reprojection_grid; fill_value = NaN32
+            )
+        end
+
+        for name in cb.field_names
+            (name == "u" || name == "v") && continue
+            fields[name] = Tethys.reproject_to_geographic(
+                fields[name], raw_ax.x, raw_ax.y, cb.reprojection_grid; fill_value = NaN32
+            )
+        end
+    end
+
     ds = cb.store_ds
     if isnothing(ds)
         # First interval: the store is created as a Tethys store, with the time axis sized to
         # the run. Written through Tethys because a store written by hand -- one directory
-        # per interval -- is one Tethys's `geoload` cannot open: its reader discovers
+        # per interval -- is one Tethys's `load_dataset` cannot open: its reader discovers
         # variables as the root group's *child arrays*, so that store opens as an empty dataset
         # and every consumer -- the larval half and the figures -- then hand-rolls its own
         # Zarr walk. That is exactly what they were doing.
         nt = _interval_count(sim, cb)
         st = output_zarr_path(cb.output_dir)
-        old_time = nothing
-        old_fields = nothing
-        old_nt = 0
         if ispath(st)
-            old_ds = Tethys.geoload(st; backend = :zarr)
-            old_nt = size(old_ds.variables[cb.field_names[1]].data, 4)
-            if old_nt >= nt
-                ds = Tethys.geoload(st; backend = :zarr, mode = "w")
+            old_ds = Tethys.load_dataset(st; backend = :zarr)
+            old_shape = size(old_ds.variables[cb.field_names[1]].data)
+            expected_nx = length(ax.x)
+            expected_ny = length(ax.y)
+            if old_shape[1] != expected_nx || old_shape[2] != expected_ny
+                @warn "Existing store spatial shape $(old_shape[1:2]) does not match target grid $(expected_nx)x$(expected_ny); resetting store."
+                rm(st; recursive = true, force = true)
+                ds = _build_store_dataset(st, ax, cb.field_names, nt, sim.model;
+                                          compressor = cb.compressor,
+                                          reprojection_grid = cb.reprojection_grid,
+                                          raw_ax = raw_ax)
                 cb.store_ds = ds
             else
-                old_time = copy(old_ds.coords[:time].data)
-                old_fields = Dict(name => copy(old_ds.variables[name].data) for name in cb.field_names)
-                ds = _build_store_dataset(st, ax, cb.field_names, nt, sim.model)
+                old_nt = old_shape[4]
+                if old_nt < nt
+                    g = Zarr.zopen(st, "w")
+                    for name in cb.field_names
+                        if haskey(g.arrays, name)
+                            cur_sz = size(g.arrays[name])
+                            Zarr.resize!(g.arrays[name], cur_sz[1:(end - 1)]..., nt)
+                        end
+                    end
+                    if haskey(g.arrays, "time")
+                        Zarr.resize!(g.arrays["time"], nt)
+                    end
+                end
+                if !isnothing(cb.compressor) && cb.compressor isa Zarr.BloscCompressor
+                    _update_existing_store_compressor!(st, cb.field_names, cb.compressor)
+                end
+                ds = Tethys.load_dataset(st; backend = :zarr, mode = "w")
                 cb.store_ds = ds
-                cb.written[] = old_nt + 1
             end
         else
-            ds = _build_store_dataset(st, ax, cb.field_names, nt, sim.model)
+            ds = _build_store_dataset(st, ax, cb.field_names, nt, sim.model;
+                                      compressor = cb.compressor,
+                                      reprojection_grid = cb.reprojection_grid,
+                                      raw_ax = raw_ax)
             cb.store_ds = ds
-        end
-        if !isnothing(old_fields)
-            for i in 1:old_nt
-                for name in cb.field_names
-                    ds.variables[name].data[:, :, :, i] .= old_fields[name][:, :, :, i]
-                end
-            end
         end
     end
     if isnothing(cb.time_array)
@@ -405,16 +649,16 @@ function (cb::GeodataOutputCallback)(sim::Oceananigans.Simulation)
         # copy, so a run's time axis stays the placeholder it was created with.
         g = Zarr.zopen(output_zarr_path(cb.output_dir), "w")
         cb.time_array = g.arrays["time"]
-        if !isnothing(old_time)
-            for i in 1:old_nt
-                cb.time_array[i] = old_time[i]
-            end
-        end
     end
 
     # `time` lives on the model's clock, not on the Simulation: `Simulation` has no `clock`
     # field, and reaching for one is a FieldError at the first write.
     t = Float64(sim.model.clock.time)
+    nt_store = size(ds.variables[cb.field_names[1]].data, 4)
+    if m > nt_store
+        @warn "Output time $(prettytime(t)) maps to slice index $(m) > store capacity $(nt_store); skipping write."
+        return nothing
+    end
     for (name, arr) in fields
         ds.variables[name].data[:, :, :, m] = arr
     end
@@ -430,10 +674,16 @@ end
 
 """
     attach_output_callback!(sim, output_dir; fields = ("u","v","w","T"), schedule = nothing,
-                            resume = false, spinup_seconds = 0.0, max_save_depth = Inf)
+                            resume = false, spinup_seconds = 0.0, max_save_depth = Inf,
+                            compressor = nothing, projection = nothing, domain_lon = nothing,
+                            domain_lat = nothing, target_lons = nothing, target_lats = nothing,
+                            reproject = true)
 
 Build the store and attach the writer to `sim`. Returns the store path, so the caller records
 it in the handover and the larval half is given a location rather than an object.
+When `projection` is supplied for a planar model and `reproject = true`, flow fields and
+immersed seabed bathymetry are reprojected onto a regular geographic WGS84 `(lon, lat)` grid,
+and velocity vectors are unrotated to true geographic East and North directions.
 
 `schedule` is a `TimeInterval` in simulated seconds, and it must be given: an `Oceananigans`
 `Callback` with no schedule fires on *every* timestep, not on the simulation's output
@@ -446,13 +696,27 @@ function attach_output_callback!(sim, output_dir::AbstractString;
                                  fields::Tuple = ("u", "v", "w", "T"),
                                  schedule = nothing, resume::Bool = false,
                                  spinup_seconds::Real = 0.0,
-                                 max_save_depth::Real = Inf)
+                                 max_save_depth::Real = Inf,
+                                 compressor = nothing,
+                                 projection = nothing,
+                                 domain_lon = nothing,
+                                 domain_lat = nothing,
+                                 target_lons = nothing,
+                                 target_lats = nothing,
+                                 reproject::Bool = true)
     if isnothing(schedule)
         schedule = Oceananigans.TimeInterval(6 * 3600.0)
     end
     cb = GeodataOutputCallback(output_dir, schedule.interval, sim.model; fields = fields,
                                resume = resume, spinup_seconds = spinup_seconds,
-                               max_save_depth = max_save_depth)
+                               max_save_depth = max_save_depth,
+                               compressor = compressor,
+                               projection = projection,
+                               domain_lon = domain_lon,
+                               domain_lat = domain_lat,
+                               target_lons = target_lons,
+                               target_lats = target_lats,
+                               reproject = reproject)
     Oceananigans.add_callback!(sim, Oceananigans.Callback(cb, schedule))
     # The store itself does not exist yet: it is built at the first output, when the grid axes
     # and the field shapes are known. What is returned is where it *will* be, so the caller can
@@ -466,8 +730,8 @@ end
 `a` copied to the host, **with its index space unchanged**.
 
 Not `Array(a)`, which for an offset array drops the offsets and so changes what a physical
-index means. And not element-by-element access either: when `a` lives on the GPU — which every
-grid coordinate and the immersed seabed do on a GPU machine — that is scalar indexing, and CUDA
+index means. And not element-by-element access either: when `a` lives on the GPU  -  which every
+grid coordinate and the immersed seabed do on a GPU machine  -  that is scalar indexing, and CUDA
 refuses it. The whole seabed extraction was written that way, so the run died there on a GPU
 and nowhere else, with an error that never mentions the seabed. Copying the storage and
 re-wrapping it in the original axes is one bulk device-to-host transfer, and the caller's
@@ -476,16 +740,19 @@ indices then mean exactly what they meant before.
 _host_copy(a) = OffsetArray(on_architecture(CPU(), parent(a)), axes(a)...)
 
 """
-    seabed_from_model(model) -> Union{Matrix{Float64}, Nothing}
+    seabed_from_model(model; reprojection_grid = nothing, raw_ax = nothing)
+    -> Union{Matrix{Float64}, Nothing}
 
 The immersed seabed the simulation actually ran on, as `[i_lon, j_lat]` with the halo
-stripped. `nothing` when the model is not on an immersed grid.
+stripped. `nothing` when the model is not on an immersed grid. When `reprojection_grid`
+is provided, the seabed matrix is reprojected from planar coordinates to regular geographic
+coordinates matching the output dataset shape.
 
 This is the same value the JLD2 `serialized/grid` branch of `read_immersed_bathymetry`
 returns, extracted from a live model so the store can carry it: a figure that masks cells
 against the seabed must see the one the run used, not a re-derived stand-in.
 """
-function seabed_from_model(model)
+function seabed_from_model(model; reprojection_grid = nothing, raw_ax = nothing)
     # A store that is not a simulation's -- the stitched mosaic -- has no grid to take a
     # seabed from, and is asked for one with `model = nothing`.
     (isnothing(model) || !hasproperty(model, :grid)) && return nothing
@@ -494,11 +761,22 @@ function seabed_from_model(model)
     ib = g.immersed_boundary
     (hasproperty(ib, :bottom_height) && !isnothing(ib.bottom_height)) || return nothing
     Hx, Hy, Nx, Ny = g.Hx, g.Hy, g.Nx, g.Ny
-    return _host_copy(ib.bottom_height)[(Hx + 1):(Hx + Nx), (Hy + 1):(Hy + Ny), 1]
+    # Extract interior seabed elements from underlying parent array without halo offset
+    raw_seabed = Matrix{Float64}(
+        parent(_host_copy(ib.bottom_height))[(Hx + 1):(Hx + Nx), (Hy + 1):(Hy + Ny), 1]
+    )
+    if reprojection_grid !== nothing
+        actual_ax = raw_ax !== nothing ? raw_ax : _field_arrays(model)
+        reprojected_seabed = Tethys.reproject_to_geographic(
+            raw_seabed, actual_ax.x, actual_ax.y, reprojection_grid; fill_value = 0.0
+        )
+        return Matrix{Float64}(reprojected_seabed)
+    end
+    return raw_seabed
 end
 
 """
-    run_metadata(model) -> Dict{String, Any}
+    run_metadata(model; reprojection_grid = nothing, raw_ax = nothing) -> Dict{String, Any}
 
 What a reader cannot recover from the store's path or from its arrays: the seabed the
 run used, a title, and the moment the store was made.
@@ -518,12 +796,12 @@ like data. A flat list plus a shape is unambiguous whatever the writer does with
 `model` is `nothing` for a store that is not a simulation's -- the stitched mosaic --
 and such a store simply has no seabed to record.
 """
-function run_metadata(model)
+function run_metadata(model; reprojection_grid = nothing, raw_ax = nothing)
     attrs = Dict{String, Any}(
         "title" => "Realized hydrodynamic simulation",
         "created_utc" => string(Dates.now(Dates.UTC)),
     )
-    seabed = seabed_from_model(model)
+    seabed = seabed_from_model(model; reprojection_grid = reprojection_grid, raw_ax = raw_ax)
     if !isnothing(seabed)
         attrs["bottom_height"] = collect(Float64, vec(seabed))
         attrs["bottom_height_shape"] = [size(seabed, 1), size(seabed, 2)]
@@ -574,8 +852,8 @@ function stitch_shelf_domains(
     isdir(tile_west_path) || error("Western tile store not found: $(tile_west_path)")
     isdir(tile_east_path) || error("Eastern tile store not found: $(tile_east_path)")
 
-    ds_w = Tethys.geoload(tile_west_path; backend = :zarr)
-    ds_e = Tethys.geoload(tile_east_path; backend = :zarr)
+    ds_w = Tethys.load_dataset(tile_west_path; backend = :zarr)
+    ds_e = Tethys.load_dataset(tile_east_path; backend = :zarr)
 
     # Resolve coordinates
     lon_w = Float64.(ds_w.coords[:lon].data)

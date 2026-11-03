@@ -76,8 +76,8 @@ tidal harmonics, air-sea heat fluxes, and Lagrangian snow crab
 - `checkpoint_schedule::Float64`: State checkpoint frequency in seconds (0.0 = match output schedule).
 - `checkpoint_dir::String`: Directory where state checkpoints are archived.
 - `checkpoint_cleanup::Bool`: Whether older intermediate checkpoints are automatically deleted.
+- `checkpoint_keep::Int`: Number of most recent checkpoints to retain during runs (default 3, <= 0 retains all).
 - `auto_restart::Bool`: Automatically detect and pick up from existing checkpoints if available.
-- `run_id::String`: Unique cohort identifier for Zarr persistence and figures.
 - `vertical_stretching_mode::Symbol`: Vertical grid stretching mode (:tanh, :uniform,
   :two_segment, or :oceananigans).
 - `vertical_break_depth::Float64`: Shelf-slope break depth separating upper refined
@@ -166,14 +166,17 @@ struct HydrodynamicOptions
      output_schedule_seconds  :: Float64
      progress_schedule_seconds :: Float64
      max_save_depth           :: Float64
+     compression_codec        :: String
+     compression_level        :: Int
+     compression_shuffle      :: Int
      output_path              :: AbstractString
      output_dir               :: String
      input_dir                :: String
     checkpoint_dir           :: String
     checkpoint_cleanup       :: Bool
+    checkpoint_keep          :: Int
     auto_restart             :: Bool
     overwrite                :: Bool
-    run_id                   :: String
     vertical_stretching_mode :: Symbol
     nz_above :: Int
     vertical_break_depth :: Float64
@@ -301,6 +304,17 @@ struct HydrodynamicOptions
     # as a `BulkDrag` bottom boundary condition and is also what the Courant estimator
     # protects, so the two cannot be allowed to disagree about it.
     cd_drag                  :: Float64
+    # Horizontal eddy viscosity/diffusivity (m^2/s). Prescribed rather than closure-driven:
+    # the shelf run is barotropic and nearly unstratified at the break, and a closure that
+    # keys on stratification switches itself off exactly where the grid-scale near-bottom
+    # shear over the 180 m break needs damping. These were previously hard-coded in
+    # `build_hydrodynamic_model`, so no configuration could raise them after a divergence.
+    horizontal_viscosity     :: Float64
+    horizontal_diffusivity   :: Float64
+    # Bathymetry conditioning: Laplacian smoothing passes applied to the regridded depth
+    # field before `GridFittedBottom` sees it. More passes round the shelf-break steps that
+    # a 2 km grid otherwise resolves as one-cell cliffs.
+    bathy_smoothing_passes   :: Int
     # Time integration ceiling
     max_dt                   :: Float64  # maximum allowable time step (s)
     # Stochastic biology parameters
@@ -383,14 +397,17 @@ function HydrodynamicOptions(;
     enable_checkpoint     :: Bool = true,
     checkpoint_prefix     :: AbstractString = "",
     checkpoint_schedule   :: Real = 0.0,
-    output_schedule_seconds :: Real = 21600.0,
+    output_schedule_seconds :: Real = 3600.0,
     progress_schedule_seconds :: Real = 1800.0,
     max_save_depth        :: Real = Inf,
+    compression_codec     :: AbstractString = "zstd",
+    compression_level     :: Integer = 7,
+    compression_shuffle   :: Integer = 1,
     checkpoint_dir        :: AbstractString = "",
     checkpoint_cleanup    :: Bool = true,
+    checkpoint_keep       :: Integer = 3,
     auto_restart             :: Bool = true,
     overwrite                :: Bool = false,
-    run_id                   :: AbstractString = "",
     vertical_stretching_mode :: Symbol = :oceananigans,
     nz_above :: Int = 0,
     vertical_break_depth :: Real = 400.0,
@@ -433,6 +450,9 @@ function HydrodynamicOptions(;
     u_inflow                 :: Real = -0.15,
     v_inflow                 :: Real = 0.05,
     cd_drag                  :: Real = 2.5e-3,
+    horizontal_viscosity     :: Real = 100.0,
+    horizontal_diffusivity   :: Real = 100.0,
+    bathy_smoothing_passes   :: Integer = 4,
     max_dt                   :: Real = 600.0,
     settlement_stochastic    :: Bool = true,
     cv_molt                  :: Real = 0.25,
@@ -525,14 +545,17 @@ function HydrodynamicOptions(;
         Float64(output_schedule_seconds),
         Float64(progress_schedule_seconds),
         Float64(max_save_depth),
+        String(compression_codec),
+        Int(compression_level),
+        Int(compression_shuffle),
         String(output_path),
         String(output_dir),
         String(input_dir),
         String(checkpoint_dir),
         checkpoint_cleanup,
+        Int(checkpoint_keep),
         auto_restart,
         overwrite,
-        String(run_id),
         vertical_stretching_mode,
         Int(nz_above),
         abs(Float64(vertical_break_depth)),
@@ -575,6 +598,9 @@ function HydrodynamicOptions(;
         Float64(u_inflow),
         Float64(v_inflow),
         Float64(cd_drag),
+        Float64(horizontal_viscosity),
+        Float64(horizontal_diffusivity),
+        Int(bathy_smoothing_passes),
         Float64(max_dt),
         settlement_stochastic,
         Float64(cv_molt),
@@ -646,6 +672,10 @@ struct HydrodynamicConfig
     divergence_limit         :: Float64
     output_path              :: AbstractString
     output_schedule_seconds  :: Float64
+    progress_schedule_seconds :: Float64
+    compression_codec        :: String
+    compression_level        :: Int
+    compression_shuffle      :: Int
     enable_checkpoint        :: Bool
     checkpoint_prefix        :: AbstractString
     checkpoint_schedule      :: Real

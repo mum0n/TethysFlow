@@ -210,7 +210,8 @@ function get_default_configuration()::Dict{String, Any}
             "checkpoint_prefix" => "checkpoint_TethysFlow",
             "checkpoint_schedule_seconds" => 21600.0,
             "checkpoint_dir" => "",
-            "checkpoint_cleanup" => true
+            "checkpoint_cleanup" => false,
+            "checkpoint_keep" => 3
         ),
         "visualization" => Dict{String, Any}(
             "interactive_map" => true,

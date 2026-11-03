@@ -121,8 +121,13 @@ output_schedule_seconds = 21600.0 # Field-output interval (seconds, 6 hours)
 enable_checkpoint = true      # Save Oceananigans simulation checkpointer state
 checkpoint_prefix = "default_checkpoint" # Filename prefix for checkpoint files
 checkpoint_schedule_seconds = 21600.0 # State checkpoint frequency in seconds
-checkpoint_cleanup = true     # Automatically purge older intermediate checkpoints
-run_id = ""                   # Unique run identifier tag
+checkpoint_cleanup = false    # Retain intermediate checkpoints for safe recovery
+checkpoint_keep = 3           # Number of most recent checkpoints to retain
+
+# Zarr compression options
+compression_codec = "zstd"    # Blosc compression codec: "zstd", "lz4", "zlib", "snappy"
+compression_level = 7         # Compression level (1-9)
+compression_shuffle = 1       # Blosc shuffle mode: 1 = byte shuffle, 2 = bit shuffle, 0 = none
 
 [runtype]
 # Execution hardware and reproducibility

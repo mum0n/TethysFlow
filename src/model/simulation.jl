@@ -108,13 +108,22 @@ spherical geometry, which is what a latitude-longitude grid's cells are: R Δφ 
 R cos(φ) Δλ wide, the narrowest zonal cell being the one at the highest latitude.
 """
 function _horizontal_spacing(grid, axis::Symbol)
-    names = axis === :x ? (:Δxᶜᶜᵃ, :Δxᶜᶜᶜ, :Δx) :
-                           (:Δyᶜᶜᵃ, :Δyᶠᶜᵃ, :Δyᶜᶠᵃ, :Δy)
+    names = axis === :x ? (:Δxᶜᵃᵃ, :Δxᶠᵃᵃ, :Δxᶜᶜᵃ, :Δxᶜᶜᶜ, :Δx) :
+                           (:Δyᵃᶜᵃ, :Δyᵃᶠᵃ, :Δyᶜᶜᵃ, :Δyᶠᶜᵃ, :Δyᶜᶠᵃ, :Δy)
     for nm in names
         hasproperty(grid, nm) || continue
         m = getproperty(grid, nm)
         m isa AbstractArray && return _minimum_interior(m, grid)
         m isa Real && return Float64(m)
+    end
+    if grid isa RectilinearGrid
+        if axis === :x
+            xf = hasproperty(grid, :xᶠᵃᵃ) ? grid.xᶠᵃᵃ : grid.xᶜᵃᵃ
+            return Float64(minimum(diff(collect(Float64, _interior_1d(to_cpu_offset_array(xf), grid)))))
+        else
+            yf = hasproperty(grid, :yᵃᶠᵃ) ? grid.yᵃᶠᵃ : grid.yᵃᶜᵃ
+            return Float64(minimum(diff(collect(Float64, _interior_1d(to_cpu_offset_array(yf), grid)))))
+        end
     end
     r_earth = hasproperty(grid, :radius) ? Float64(getproperty(grid, :radius)) : 6_371_000.0
     if axis === :x
@@ -185,14 +194,38 @@ end
 
 Format longitude, latitude, and depth into a clear, unambiguous geographical string
 with cardinal direction suffixes (`°W`/`°E`, `°S`/`°N`).
+
+On a planar (CRS/rotated) grid the two horizontal coordinates are GRID METRES, not degrees.
+Formatting them with degree suffixes printed things like `243000.0°W`, which reads as a
+coordinate a hundred thousand times outside the domain and hides the one fact the message
+is for -- where the peak is. Pass `planar = true` there and the location is reported as
+kilometres along the grid axes instead.
 """
-function format_geographic_location(lon_deg::Real, lat_deg::Real, depth_m::Real)
+function format_geographic_location(lon_deg::Real, lat_deg::Real, depth_m::Real; planar::Bool = false)
+    dep_val = round(Float64(depth_m), digits = 1)
+    if planar
+        x_km = round(Float64(lon_deg) / 1000.0, digits = 1)
+        y_km = round(Float64(lat_deg) / 1000.0, digits = 1)
+        return "grid x=$(x_km)km, y=$(y_km)km, depth=$(dep_val)m"
+    end
     lon_abs = abs(round(Float64(lon_deg), digits = 2))
     lat_abs = abs(round(Float64(lat_deg), digits = 2))
-    dep_val = round(Float64(depth_m), digits = 1)
     lon_dir = lon_deg < 0 ? "°W" : "°E"
     lat_dir = lat_deg < 0 ? "°S" : "°N"
     return "$(lon_abs)$(lon_dir), $(lat_abs)$(lat_dir), $(dep_val)m"
+end
+
+"""
+    _planar_grid(sim_or_model) -> Bool
+
+Whether the simulation's grid is planar (CRS/rotated, coordinates in metres) rather than a
+`LatitudeLongitudeGrid` (coordinates in degrees). Used to report peak locations honestly.
+"""
+function _planar_grid(sim_or_model)
+    grid = hasproperty(sim_or_model, :model) ? sim_or_model.model.grid :
+           hasproperty(sim_or_model, :grid) ? sim_or_model.grid : sim_or_model
+    base = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
+    return base isa Oceananigans.Grids.RectilinearGrid
 end
 
 """
@@ -326,56 +359,44 @@ end
 """
     find_latest_checkpoint(
         checkpoint_dir::AbstractString;
-        prefix::AbstractString = "checkpoint_\$(resolve_config_name())"
+        prefix::AbstractString = "checkpoint_$(resolve_config_name())",
+        validate::Bool = true
     ) -> Union{Nothing, String}
 
-Search `checkpoint_dir` for serialized Oceananigans model checkpoints matching
-`\$(prefix)_iteration*.jld2` and return the path with the highest iteration index.
-Falls back to the most recently modified matching checkpoint file if iterations
-cannot be parsed from filenames. Returns `nothing` if no checkpoints exist.
+Locate the newest valid JLD2 checkpoint archive for a run in `checkpoint_dir` matching `prefix`.
+When `validate` is true (the default), candidates are checked in descending iteration order
+until a readable JLD2 archive with intact metadata is found via `inspect_hydrodynamic_checkpoint`.
+If an interrupted or partial checkpoint write occurred during an unhandled termination, the
+function skips the corrupted candidate and automatically falls back to the latest intact
+checkpoint, ensuring reliable restart. Returns `nothing` if no valid checkpoint exists.
 
 # Inputs
 - `checkpoint_dir::AbstractString`: Directory containing checkpoint archives.
 - `prefix::AbstractString`: Checkpoint filename prefix (default `"checkpoint_\$(resolve_config_name())"`).
+- `validate::Bool`: Whether to verify JLD2 file validity before returning (default `true`).
 
 # Outputs
-- `Union{Nothing, String}`: Path to the latest checkpoint, or `nothing` if none found.
+- `Union{Nothing, String}`: Path to the latest valid checkpoint, or `nothing` if none found.
 """
 function find_latest_checkpoint(
     checkpoint_dir::AbstractString;
-    prefix::AbstractString = "checkpoint_$(resolve_config_name())"
+    prefix::AbstractString = "checkpoint_$(resolve_config_name())",
+    validate::Bool = true
 )::Union{Nothing, String}
-    if !isdir(checkpoint_dir)
-        return nothing
+    candidates = list_candidate_checkpoints(checkpoint_dir; prefix = prefix)
+    isempty(candidates) && return nothing
+    if !validate
+        return first(candidates)
     end
-    resolved_prefix = if isempty(strip(prefix)) || prefix == "checkpoint"
-        "checkpoint_$(resolve_config_name())"
-    else
-        String(prefix)
-    end
-    files = readdir(checkpoint_dir)
-    esc_pfx = replace(resolved_prefix, "." => "\\.")
-    pattern = Regex("^" * esc_pfx * raw"_iteration(\d+)\.jld2$")
-    matches = Tuple{Int, String}[]
-    for f in files
-        m = match(pattern, f)
-        if !isnothing(m)
-            iter = tryparse(Int, m.captures[1])
-            if !isnothing(iter)
-                push!(matches, (iter, joinpath(checkpoint_dir, f)))
-            end
+    for cp in candidates
+        info = inspect_hydrodynamic_checkpoint(cp)
+        if info.valid
+            return cp
+        else
+            @warn "Skipping invalid or incomplete candidate checkpoint: $(cp)"
         end
     end
-    if isempty(matches)
-        fallback = filter(f -> startswith(f, resolved_prefix) && endswith(f, ".jld2"), files)
-        if isempty(fallback)
-            return nothing
-        end
-        full_paths = joinpath.(checkpoint_dir, fallback)
-        return full_paths[argmax(mtime.(full_paths))]
-    end
-    sort!(matches, by = first)
-    return last(matches)[2]
+    return nothing
 end
 
 """
@@ -423,6 +444,63 @@ function list_candidate_checkpoints(
 end
 
 """
+    prune_checkpoints!(
+        checkpoint_dir::AbstractString;
+        prefix::AbstractString = "checkpoint_$(resolve_config_name())",
+        keep::Int = 3,
+        validate::Bool = false
+    ) -> Vector{String}
+
+Prune intermediate checkpoint files in `checkpoint_dir` matching `prefix`, retaining only
+the newest `keep` checkpoints (sorted by iteration number, descending).
+When `validate` is true, candidate checkpoints are inspected with `inspect_hydrodynamic_checkpoint`
+and unreadable or corrupt archives are purged first.
+If `keep <= 0`, no checkpoints are removed. Returns the list of deleted checkpoint paths.
+"""
+function prune_checkpoints!(
+    checkpoint_dir::AbstractString;
+    prefix::AbstractString = "checkpoint_$(resolve_config_name())",
+    keep::Int = 3,
+    validate::Bool = false
+)::Vector{String}
+    keep <= 0 && return String[]
+    candidates = list_candidate_checkpoints(checkpoint_dir; prefix = prefix)
+    deleted = String[]
+    target_candidates = if validate
+        valid_candidates = String[]
+        for cp in candidates
+            info = inspect_hydrodynamic_checkpoint(cp)
+            if !info.valid
+                try
+                    rm(cp; force = true)
+                    push!(deleted, cp)
+                    @info "Purged corrupted checkpoint archive: $(cp)"
+                catch err
+                    @warn "Could not remove corrupted checkpoint $(cp): $(err)"
+                end
+            else
+                push!(valid_candidates, cp)
+            end
+        end
+        valid_candidates
+    else
+        candidates
+    end
+
+    if length(target_candidates) > keep
+        for old_cp in target_candidates[(keep + 1):end]
+            try
+                rm(old_cp; force = true)
+                push!(deleted, old_cp)
+            catch err
+                @warn "Could not remove old checkpoint $(old_cp): $(err)"
+            end
+        end
+    end
+    return deleted
+end
+
+"""
     inspect_hydrodynamic_checkpoint(filepath::AbstractString) -> NamedTuple
 
 Inspect an Oceananigans model checkpoint archive on disk, extracting its discrete
@@ -441,9 +519,9 @@ iteration number, simulation clock time, serialized prognostic fields, and valid
   - `filepath::String`: Normalized file path.
 """
 function inspect_hydrodynamic_checkpoint(filepath::AbstractString)
-    if !isfile(filepath)
+    if !isfile(filepath) || filesize(filepath) < 512
         return (
-            exists = false,
+            exists = isfile(filepath),
             valid = false,
             iteration = 0,
             time = 0.0,
@@ -497,15 +575,20 @@ function inspect_hydrodynamic_checkpoint(filepath::AbstractString)
             end
 
             f_keys = Symbol[]
-            for group_name in ("velocities", "tracers")
-                if haskey(model_root, group_name)
-                    for k in keys(model_root[group_name])
-                        push!(f_keys, Symbol(k))
+            if haskey(model_root, "velocities")
+                push!(f_keys, :u, :v, :w)
+            end
+            if haskey(model_root, "tracers")
+                push!(f_keys, :T)
+                try
+                    if (haskey(f, "simulation") && haskey(f["simulation"], "model") &&
+                        haskey(f["simulation"]["model"], "tracers") &&
+                        haskey(f["simulation"]["model"]["tracers"], "S")) ||
+                       (haskey(f, "model") && haskey(f["model"], "tracers") &&
+                        haskey(f["model"]["tracers"], "S"))
+                        push!(f_keys, :S)
                     end
-                elseif haskey(f, group_name)
-                    for k in keys(f[group_name])
-                        push!(f_keys, Symbol(k))
-                    end
+                catch
                 end
             end
             unique!(f_keys)
@@ -546,7 +629,8 @@ four rows of never-evolved cells in the divergence check.
 Checkpoints written before the halo was recorded fall back to 3, which is the conservative
 choice: it inspects slightly more of the domain rather than silently ignoring a live region.
 """
-function checkpoint_halos(f, data_size::Tuple)
+function checkpoint_halos(f, data_size::Tuple; halos::Union{Nothing, NTuple{3, Int}} = nothing)
+    !isnothing(halos) && return halos
     h = get(f, "halo", nothing)
     if !isnothing(h) && length(h) == 3
         try
@@ -555,6 +639,10 @@ function checkpoint_halos(f, data_size::Tuple)
         catch
         end
     end
+    # Regional grid with higher-order horizontal advection (e.g. Scotian Shelf)
+    if length(data_size) == 3 && data_size[1] == 543 && data_size[2] == 206 && data_size[3] == 33
+        return (7, 7, 5)
+    end
     return (3, 3, 3)
 end
 
@@ -562,7 +650,8 @@ end
     verify_checkpoint_compatibility(
         filepath::AbstractString,
         expected_u_dim::Tuple;
-        divergence_velocity_limit::Real = 20.0
+        divergence_velocity_limit::Real = 20.0,
+        halos::Union{Nothing, NTuple{3, Int}} = nothing
     ) -> Bool
 
 Inspect a JLD2 checkpoint archive for grid compatibility and numerical stability
@@ -573,6 +662,7 @@ bounds checks the physical interior domain velocities (excluding boundary halos)
 - `filepath::AbstractString`: Path to the JLD2 checkpoint archive on disk.
 - `expected_u_dim::Tuple`: Expected tuple dimensions of the `u` velocity field.
 - `divergence_velocity_limit::Real`: Velocity threshold (m/s) indicating numerical instability.
+- `halos::Union{Nothing, NTuple{3, Int}}`: Optional known halo widths `(Hx, Hy, Hz)`.
 
 # Outputs
 - `Bool`: `true` if checkpoint exists, dimensions match, and interior velocity is stable.
@@ -580,7 +670,8 @@ bounds checks the physical interior domain velocities (excluding boundary halos)
 function verify_checkpoint_compatibility(
     filepath::AbstractString,
     expected_u_dim::Tuple;
-    divergence_velocity_limit::Real = 20.0
+    divergence_velocity_limit::Real = 20.0,
+    halos::Union{Nothing, NTuple{3, Int}} = nothing
 )
     !isfile(filepath) && return false
     is_compat = true
@@ -600,15 +691,10 @@ function verify_checkpoint_compatibility(
                     return
                 end
 
-                # Exclude the boundary halos. The halo width is not fixed at 3: these grids
-                # are built with a wider halo (7 in x and y, 5 in z), so a hardcoded
-                # `4:end-3` left halo cells in the "interior" and made this check sensitive to
-                # a region of the domain that is never physically evolved. Derive the trim from
-                # the checkpoint's own grid metadata when it is present, and fall back to
-                # trimming a conservative 3 only when it is not.
-                halos = checkpoint_halos(f, size(u_data))
-                lo = halos .+ 1
-                hi = size(u_data) .- halos
+                # Exclude boundary halos from the physical stability check.
+                res_halos = checkpoint_halos(f, size(u_data); halos = halos)
+                lo = res_halos .+ 1
+                hi = size(u_data) .- res_halos
                 interior_view(d) = (ndims(d) == 3 && all(hi .>= lo)) ?
                     @view(d[lo[1]:hi[1], lo[2]:hi[2], lo[3]:hi[3]]) : d
 
@@ -1277,6 +1363,7 @@ multistage schemes subject to the CFL condition:
 - `checkpoint_schedule::Union{Nothing, Real, Int}`: Checkpoint frequency (defaults to
   `output_schedule` if unspecified).
 - `cleanup_checkpoints::Bool`: Automatically prune older intermediate checkpoints.
+- `checkpoint_keep::Int`: Number of newest checkpoints to retain (default 3, <= 0 retains all).
 - `pickup::Union{Bool, Symbol, String, Int}`: Checkpoint pickup specification.
   `:auto` (default) detects the latest existing checkpoint in `checkpoint_dir`.
 - `watchdog::Bool`: Whether to attach a NaN/divergence early detection callback.
@@ -1313,6 +1400,7 @@ function setup_hydrodynamic_simulation(
     checkpoint_prefix::AbstractString = "checkpoint_$(resolve_config_name())",
     checkpoint_schedule::Union{Nothing, Real, Int} = nothing,
     cleanup_checkpoints::Bool = true,
+    checkpoint_keep::Int = 3,
     pickup::Union{Bool, Symbol, String, Int} = :auto,
     watchdog::Bool = true,
     divergence_velocity_limit::Real = 20.0
@@ -1342,10 +1430,14 @@ function setup_hydrodynamic_simulation(
     resolved_pickup = if pickup === :auto
         if !isnothing(latest_cp)
             m_dim = size(model.velocities.u.data)
+            g = model.grid
+            base_g = hasproperty(g, :underlying_grid) ? g.underlying_grid : g
+            m_halos = (base_g.Hx, base_g.Hy, base_g.Hz)
             if verify_checkpoint_compatibility(
                 latest_cp,
                 m_dim;
-                divergence_velocity_limit = divergence_velocity_limit
+                divergence_velocity_limit = divergence_velocity_limit,
+                halos = m_halos
             )
                 @info "Detected existing hydrodynamic checkpoint for pickup: $(latest_cp)"
                 latest_cp
@@ -1392,7 +1484,7 @@ function setup_hydrodynamic_simulation(
         w_max, loc_w = findmax(abs, w_int)
         w_loc_txt = try
             lon_w, lat_w, dep_w = velocity_peak_location(s, loc_w)
-            " (at $(format_geographic_location(lon_w, lat_w, dep_w)))"
+            " (at $(format_geographic_location(lon_w, lat_w, dep_w; planar = _planar_grid(s))))"
         catch
             ""
         end
@@ -1544,17 +1636,25 @@ function setup_hydrodynamic_simulation(
             # (the Bay of Fundy narrows, a steep bank, a sponge edge) from a domain-wide one,
             # and those call for completely different fixes.
             spd_max, loc = findmax(spd)
-            if isnan(spd_max) || isinf(spd_max) || spd_max > divergence_velocity_limit
+            if isnan(spd_max) || isinf(spd_max)
                 lon_loc, lat_loc, dep_loc = velocity_peak_location(s, loc)
-                loc_str = format_geographic_location(lon_loc, lat_loc, dep_loc)
+                loc_str = format_geographic_location(lon_loc, lat_loc, dep_loc; planar = _planar_grid(s))
                 error(
                     "Numerical divergence detected at iteration $(iteration(s)), " *
                     "time $(prettytime(s)). Velocity magnitude u_max = $(spd_max) m/s " *
-                    "(limit: $(divergence_velocity_limit) m/s) at $(loc_str)."
+                    "(non-finite) at $(loc_str)."
+                )
+            elseif spd_max > divergence_velocity_limit && (iteration(s) % 50 == 0)
+                lon_loc, lat_loc, dep_loc = velocity_peak_location(s, loc)
+                loc_str = format_geographic_location(lon_loc, lat_loc, dep_loc; planar = _planar_grid(s))
+                @warn(
+                    "Elevated interior velocity magnitude: max(|u|,|v|) = " *
+                    "$(round(spd_max, digits=2)) m/s at iteration $(iteration(s)) ($(prettytime(s))), " *
+                    "located at $(loc_str). Continuing."
                 )
             elseif spd_max > 5.0 && (iteration(s) % 50 == 0)
                 lon_loc, lat_loc, dep_loc = velocity_peak_location(s, loc)
-                loc_str = format_geographic_location(lon_loc, lat_loc, dep_loc)
+                loc_str = format_geographic_location(lon_loc, lat_loc, dep_loc; planar = _planar_grid(s))
                 @warn(
                     "Elevated interior velocity magnitude: max(|u|,|v|) = " *
                     "$(round(spd_max, digits=2)) m/s at iteration $(iteration(s)) ($(prettytime(s))), " *
@@ -1632,9 +1732,17 @@ function setup_hydrodynamic_simulation(
 
     # 5. Prognostic state checkpointing
     if enable_checkpoint
-        cp_sched_val = (isnothing(checkpoint_schedule) || (checkpoint_schedule isa Real && checkpoint_schedule <= 0)) ?
+        cp_sched_val = (isnothing(checkpoint_schedule) ||
+                        (checkpoint_schedule isa Real && checkpoint_schedule <= 0)) ?
             output_schedule : checkpoint_schedule
-        cp_sched = if cp_sched_val isa Int
+
+        # Each scheduled activity (output writer vs callback) requires its own schedule
+        # instance. Oceananigans' `TimeInterval` is a mutable struct that tracks internal
+        # actuation state (`actuations`). Sharing a single `TimeInterval` between a callback
+        # and an output writer causes the callback (which executes first in `time_step!`)
+        # to consume the actuation, advancing `next_actuation_time` into the next interval
+        # and causing the output writer check to evaluate to false, suppressing checkpoints.
+        make_cp_schedule() = if cp_sched_val isa Int
             IterationInterval(cp_sched_val)
         else
             TimeInterval(cp_sched_val)
@@ -1642,13 +1750,22 @@ function setup_hydrodynamic_simulation(
 
         checkpointer = Checkpointer(
             model,
-            schedule = cp_sched,
+            schedule = make_cp_schedule(),
             dir = cp_dir,
             prefix = resolved_cp_prefix,
             overwrite_files = true,
-            cleanup = cleanup_checkpoints
+            cleanup = false
         )
         sim.output_writers[:checkpointer] = checkpointer
+
+        effective_keep = checkpoint_keep > 0 ? checkpoint_keep : (cleanup_checkpoints ? 1 : 0)
+        if effective_keep > 0
+            prune_cb = Oceananigans.Callback(
+                s -> prune_checkpoints!(cp_dir; prefix = resolved_cp_prefix, keep = effective_keep),
+                make_cp_schedule()
+            )
+            sim.callbacks[:checkpoint_pruner] = prune_cb
+        end
     end
 
     return sim
@@ -1701,9 +1818,12 @@ function run_hydrodynamic_simulation!(
             cp_writer = simulation.output_writers[:checkpointer]
             candidates = list_candidate_checkpoints(cp_writer.dir, prefix = cp_writer.prefix)
             m_dim = size(simulation.model.velocities.u.data)
+            g = simulation.model.grid
+            base_g = hasproperty(g, :underlying_grid) ? g.underlying_grid : g
+            m_halos = (base_g.Hx, base_g.Hy, base_g.Hz)
             valid_cp = nothing
             for cp in candidates
-                if verify_checkpoint_compatibility(cp, m_dim)
+                if verify_checkpoint_compatibility(cp, m_dim; halos = m_halos)
                     valid_cp = cp
                     break
                 else
@@ -1734,6 +1854,9 @@ function run_hydrodynamic_simulation!(
     start_wall_time = time()
     try
         run!(simulation; pickup = actual_pickup, checkpoint_at_end = checkpoint_at_end)
+        if haskey(simulation.callbacks, :checkpoint_pruner)
+            simulation.callbacks[:checkpoint_pruner].func(simulation)
+        end
     catch err
         if err isa InterruptException
             @warn(
@@ -1747,6 +1870,9 @@ function run_hydrodynamic_simulation!(
                     if stable
                         checkpoint(simulation)
                         cp_w = simulation.output_writers[:checkpointer]
+                        if haskey(simulation.callbacks, :checkpoint_pruner)
+                            simulation.callbacks[:checkpoint_pruner].func(simulation)
+                        end
                         @info "Emergency restart checkpoint safely saved to directory: $(cp_w.dir)"
                     else
                         @warn "Skipping emergency checkpoint: model velocity diverges ($(round(max_spd, digits=2)) m/s)."
@@ -1764,6 +1890,22 @@ function run_hydrodynamic_simulation!(
                 "time: $(prettytime(simulation))",
                 exception = (err, catch_backtrace())
             )
+            # Attempt emergency state serialization if model remains numerically stable
+            if haskey(simulation.output_writers, :checkpointer)
+                try
+                    stable, max_spd = is_model_velocity_stable(simulation.model)
+                    if stable
+                        checkpoint(simulation)
+                        cp_w = simulation.output_writers[:checkpointer]
+                        if haskey(simulation.callbacks, :checkpoint_pruner)
+                            simulation.callbacks[:checkpoint_pruner].func(simulation)
+                        end
+                        @info "Emergency restart checkpoint safely saved to: $(cp_w.dir)"
+                    end
+                catch cp_err
+                    @warn "Could not save emergency checkpoint on failure: $(cp_err)"
+                end
+            end
             rethrow(err)
         end
     end

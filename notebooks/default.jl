@@ -350,7 +350,7 @@ import TethysFlow: extract_hydrodynamic_dataset, output_zarr_path
 using Tethys
 
 store_dir = output_zarr_path(sim_res.output_path)
-_times = Float64.(collect(Tethys.geoload(store_dir; backend = :zarr).coords[:time].data))
+_times = Float64.(collect(Tethys.load_dataset(store_dir; backend = :zarr).coords[:time].data))
 
 println("store     : ", store_dir)
 println("intervals : ", length(_times), " (expected ", opts.sim_duration / opts.output_schedule_seconds + 1, ")")

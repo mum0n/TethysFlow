@@ -943,7 +943,7 @@ sponge forcing hit before, and the fix is the same: reduce the field to a small 
 and do arithmetic, exactly as `compute_sponge_gamma` does with its scalar corner arguments.
 
 # Fields
-- `lon0`, `dlon`, `lat0`, `dlat::Float64`: regular grid origin and spacing, so a coordinate maps
+- `x0`, `dx`, `y0`, `dy::Float64`: model-coordinate grid origin and spacing, so a coordinate maps
   to an index by arithmetic instead of by search.
 - `nx`, `ny::Int`: grid dimensions.
 - `uRe`, `uIm`, `vRe`, `vIm`: complex amplitude components, as nested `ntuple`s of `Float64`
@@ -957,16 +957,15 @@ Interpolating the real and imaginary parts separately avoids the phase wrapping 
 itself stores, so no polar conversion is needed on the host either. The reconstruction
 `Re*cos(w t) - Im*sin(w t)` is the one documented on [`TidalVelocityHarmonics`](@ref).
 
-The grid is deliberately coarse. The tidal field varies on scales of degrees, so a dozen points
-per axis reproduces the structure that matters -- 0.006 m/s on the southern boundary against
-0.44 m/s in the Bay of Fundy -- while keeping the coefficient object small enough to pass into a
-kernel.
+The grid is deliberately coarse. Its points span the model domain, are sampled from the
+geographic atlas on the host, and are kept few enough that the coefficient object fits in a GPU
+kernel argument.
 """
 struct TidalCoefficientGrid{N, NX, NY, NT}
-    lon0::Float64
-    dlon::Float64
-    lat0::Float64
-    dlat::Float64
+    x0::Float64
+    dx::Float64
+    y0::Float64
+    dy::Float64
     nx::Int
     ny::Int
     uRe::NTuple{NT, Float64}
@@ -984,8 +983,8 @@ Adapt.adapt_structure(to, f::TidalVelocityField) = TidalVelocityField(Adapt.adap
 
 @inline function (f::TidalVelocityField)(x, y, z, t)
     g = f.grid
-    fx = (x - g.lon0) / g.dlon
-    fy = (y - g.lat0) / g.dlat
+    fx = (x - g.x0) / g.dx
+    fy = (y - g.y0) / g.dy
     (fx < 0 || fy < 0 || fx > g.nx - 1 || fy > g.ny - 1) && return 0.0
     i = clamp(floor(Int, fx) + 1, 1, g.nx - 1)
     j = clamp(floor(Int, fy) + 1, 1, g.ny - 1)
@@ -1020,10 +1019,12 @@ TidalCoefficientGrid{N, NX, NY}(args...) where {N, NX, NY} =
     TidalCoefficientGrid{N, NX, NY, N * NX * NY}(args...)
 
 """
-    TidalCoefficientGrid(h, lon_range, lat_range; nx = 12, ny = 8)
+    TidalCoefficientGrid(h, x_range, y_range; projection = nothing, nx = 12, ny = 8)
 
-Resample harmonic constants onto a small regular grid over `lon_range`/`lat_range` so the
-forcing can later be evaluated by arithmetic alone, on CPU or GPU.
+Resample harmonic constants onto a small regular grid over model coordinates `x_range` and
+`y_range`. With a planar `projection`, each sample point is inverse-projected to geographic
+coordinates, and its east/north harmonic vector components are rotated into model-grid axes
+before being stored. The resulting evaluator takes the model's own `x,y` coordinates.
 
 The nearest-neighbour sampling happens here, once, on the host. That is the point: the
 allocation-heavy work happens during setup, and the object handed to the kernel contains only
@@ -1035,15 +1036,16 @@ numbers.
 
 function TidalCoefficientGrid(
     h::TidalVelocityHarmonics,
-    lon_range::NTuple{2, Float64},
-    lat_range::NTuple{2, Float64};
+    x_range::NTuple{2, Float64},
+    y_range::NTuple{2, Float64};
+    projection = nothing,
     nx::Int = 12,
     ny::Int = 8
 )
     N = length(h.omega)
-    lon0, lat0 = Float64(lon_range[1]), Float64(lat_range[1])
-    dlon = (lon_range[2] - lon_range[1]) / max(1, nx - 1)
-    dlat = (lat_range[2] - lat_range[1]) / max(1, ny - 1)
+    x0, y0 = Float64(x_range[1]), Float64(y_range[1])
+    dx = (x_range[2] - x_range[1]) / max(1, nx - 1)
+    dy = (y_range[2] - y_range[1]) / max(1, ny - 1)
 
     # Flat layout, indexed k + N*(j-1) + N*nx*(i-1).
     sre = zeros(Float64, N, ny, nx)
@@ -1051,8 +1053,10 @@ function TidalCoefficientGrid(
     svre = zeros(Float64, N, ny, nx)
     svim = zeros(Float64, N, ny, nx)
     for j in 1:ny, i in 1:nx
-        lon = lon0 + (i - 1) * dlon
-        lat = lat0 + (j - 1) * dlat
+        x = x0 + (i - 1) * dx
+        y = y0 + (j - 1) * dy
+        lon, lat = projection !== nothing && is_planar(projection) ?
+            project_inverse(projection, x, y) : (x, y)
         ia = argmin(abs.(h.lon .- lon))
         ja = argmin(abs.(h.lat .- lat))
         (ib, jb) = nearest_water(h, ia, ja)
@@ -1060,10 +1064,14 @@ function TidalCoefficientGrid(
             # A point can be water for one constituent and masked for another, so every
             # component is sanitised here. Without this a single NaN poisons the whole
             # harmonic sum and the forcing returns NaN across the domain.
-            sre[k, j, i] = _finite(h.uRe[k, jb, ib])
-            sim[k, j, i] = _finite(h.uIm[k, jb, ib])
-            svre[k, j, i] = _finite(h.vRe[k, jb, ib])
-            svim[k, j, i] = _finite(h.vIm[k, jb, ib])
+            u_re, v_re = _finite(h.uRe[k, jb, ib]), _finite(h.vRe[k, jb, ib])
+            u_im, v_im = _finite(h.uIm[k, jb, ib]), _finite(h.vIm[k, jb, ib])
+            if projection !== nothing
+                u_re, v_re = rotate_vector_to_grid(projection, u_re, v_re, lon, lat)
+                u_im, v_im = rotate_vector_to_grid(projection, u_im, v_im, lon, lat)
+            end
+            sre[k, j, i], svre[k, j, i] = u_re, v_re
+            sim[k, j, i], svim[k, j, i] = u_im, v_im
         end
     end
     # vec() gives column-major (k fastest, then j, then i), which is exactly the flat index
@@ -1071,7 +1079,7 @@ function TidalCoefficientGrid(
     flat(a) = ntuple(q -> a[q], N * ny * nx)
 
     return TidalCoefficientGrid{N, nx, ny}(
-        lon0, dlon, lat0, dlat, nx, ny,
+        x0, dx, y0, dy, nx, ny,
         flat(vec(sre)), flat(vec(sim)), flat(vec(svre)), flat(vec(svim)),
         ntuple(k -> Float64(h.omega[k]), N))
 end
@@ -1096,8 +1104,8 @@ function tidal_forcing_coefficients(g::TidalCoefficientGrid{N, NX, NY}) where {N
     @inline at(A, k, i, j) = @inbounds A[k + N * ((j - 1) + g.ny * (i - 1))]
 
     @inline function locate(x, y)
-        fx = (x - g.lon0) / g.dlon
-        fy = (y - g.lat0) / g.dlat
+        fx = (x - g.x0) / g.dx
+        fy = (y - g.y0) / g.dy
         (fx < 0 || fy < 0 || fx > NX - 1 || fy > NY - 1) && return (0, 0, 0.0, 0.0)
         i = clamp(floor(Int, fx) + 1, 1, NX - 1)
         j = clamp(floor(Int, fy) + 1, 1, NY - 1)
@@ -1167,8 +1175,8 @@ function tidal_velocity_coefficients(g::TidalCoefficientGrid{N, NX, NY}) where {
     @inline at(A, k, i, j) = @inbounds A[k + N * ((j - 1) + g.ny * (i - 1))]
 
     @inline function locate(x, y)
-        fx = (x - g.lon0) / g.dlon
-        fy = (y - g.lat0) / g.dlat
+        fx = (x - g.x0) / g.dx
+        fy = (y - g.y0) / g.dy
         (fx < 0 || fy < 0 || fx > NX - 1 || fy > NY - 1) && return (0, 0, 0.0, 0.0)
         i = clamp(floor(Int, fx) + 1, 1, NX - 1)
         j = clamp(floor(Int, fy) + 1, 1, NY - 1)

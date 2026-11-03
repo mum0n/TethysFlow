@@ -236,7 +236,8 @@ function configuration_to_options(config_dict::AbstractDict;
      hydro_only = Bool(get_val("hydrodynamics", "hydro_only", false))
      track_only = Bool(get_val("hydrodynamics", "track_only", false))
     reuse_hydro = Bool(get_val("hydrodynamics", "reuse_hydro", false))
-    run_id_val = String(get_val("storage", "run_id", ""))
+    cp_keep = Int(get_val("storage", "checkpoint_keep",
+                          get_val("hydrodynamics", "checkpoint_keep", 3)))
 
     enable_cp = Bool(get_val("storage", "enable_checkpoint",
                              get_val("hydrodynamics", "enable_checkpoint", true)))
@@ -253,6 +254,12 @@ function configuration_to_options(config_dict::AbstractDict;
     # minutes at first and every few hours once the step has grown.
     prog_sched = Float64(get_val("storage", "progress_schedule_seconds", 1800.0))
     max_save_d = Float64(get_val("storage", "max_save_depth", Inf))
+    comp_codec = String(get_val("storage", "compression_codec",
+                                get_val("storage", "compressor", "zstd")))
+    comp_level = Int(get_val("storage", "compression_level",
+                             get_val("storage", "clevel", 7)))
+    comp_shuffle = Int(get_val("storage", "compression_shuffle",
+                               get_val("storage", "shuffle", 1)))
      cp_dir    = String(get_val("storage", "checkpoint_dir",
                                 get_val("runtype", "checkpoint_dir",
                                         get_val("paths", "checkpoint_dir", ""))))
@@ -473,13 +480,16 @@ function configuration_to_options(config_dict::AbstractDict;
         checkpoint_prefix = cp_pfx_raw,
         checkpoint_schedule = cp_sched,
         output_schedule_seconds = out_sched,
-    progress_schedule_seconds = prog_sched,
+        progress_schedule_seconds = prog_sched,
         max_save_depth = max_save_d,
+        compression_codec = comp_codec,
+        compression_level = comp_level,
+        compression_shuffle = comp_shuffle,
         checkpoint_dir = cp_dir,
         checkpoint_cleanup = cp_clean,
+        checkpoint_keep = cp_keep,
         auto_restart = auto_res,
         overwrite = Bool(get_val("storage", "overwrite", false)),
-        run_id = run_id_val,
         vertical_stretching_mode = v_mode,
         nz_above = nz_above_cfg,
         vertical_break_depth = vertical_break_depth,
@@ -522,6 +532,9 @@ function configuration_to_options(config_dict::AbstractDict;
         u_inflow = u_inflow_val,
         v_inflow = v_inflow_val,
         cd_drag = Float64(get_val("hydrodynamics", "cd_drag", 2.5e-3)),
+        horizontal_viscosity = Float64(get_val("hydrodynamics", "horizontal_viscosity", 100.0)),
+        horizontal_diffusivity = Float64(get_val("hydrodynamics", "horizontal_diffusivity", 100.0)),
+        bathy_smoothing_passes = Int(get_val("bathymetry", "smoothing_passes", 4)),
         max_dt = max_dt_val,
         settlement_stochastic = settlement_stochastic,
         cv_molt = cv_molt,
@@ -600,7 +613,8 @@ function options_to_configuration(opts::HydrodynamicOptions)::Dict{String, Any}
         "bathymetry" => Dict{String, Any}(
             "inshore_depth" => opts.inshore_depth,
             "shelf_slope" => opts.shelf_slope,
-            "mask_bay_of_fundy" => opts.mask_bay_of_fundy
+            "mask_bay_of_fundy" => opts.mask_bay_of_fundy,
+            "smoothing_passes" => opts.bathy_smoothing_passes
         ),
         "tides" => Dict{String, Any}(
             "enable_tides" => opts.enable_tides,
@@ -620,6 +634,8 @@ function options_to_configuration(opts::HydrodynamicOptions)::Dict{String, Any}
             "min_dt_seconds" => opts.min_dt_seconds,
             "surface_heat_flux" => opts.surface_heat_flux,
             "cd_drag" => opts.cd_drag,
+            "horizontal_viscosity" => opts.horizontal_viscosity,
+            "horizontal_diffusivity" => opts.horizontal_diffusivity,
             "max_flow_snapshots" => something(opts.max_flow_snapshots, 0),
             "allow_analytical_fallback" => opts.allow_analytical_fallback,
             "max_current_speed" => something(opts.max_current_speed, 0.0),
@@ -660,7 +676,7 @@ function options_to_configuration(opts::HydrodynamicOptions)::Dict{String, Any}
         ),
         "storage" => Dict{String, Any}(
             "output_dir" => opts.output_dir,
-            "run_id" => opts.run_id,
+            "checkpoint_keep" => opts.checkpoint_keep,
             "enable_checkpoint" => opts.enable_checkpoint,
             "checkpoint_prefix" => opts.checkpoint_prefix,
             "checkpoint_schedule_seconds" => opts.checkpoint_schedule,
@@ -669,7 +685,10 @@ function options_to_configuration(opts::HydrodynamicOptions)::Dict{String, Any}
             "checkpoint_dir" => opts.checkpoint_dir,
             "checkpoint_cleanup" => opts.checkpoint_cleanup,
             # Read from `[storage]`, so it must be written back there.
-            "max_save_depth" => opts.max_save_depth
+            "max_save_depth" => opts.max_save_depth,
+            "compression_codec" => opts.compression_codec,
+            "compression_level" => opts.compression_level,
+            "compression_shuffle" => opts.compression_shuffle
         ),
         "tessellation" => Dict{String, Any}(
             "enable_voronoi" => opts.enable_voronoi,
@@ -767,8 +786,11 @@ function to_hydrodynamic_config(opts::HydrodynamicOptions; kwargs...)::Hydrodyna
          :coriolis_latitude        => 44.5,
          :divergence_limit         => 20.0,
          :output_path              => opts.output_path,
-              :output_schedule_seconds  => opts.output_schedule_seconds,
-    :progress_schedule_seconds => opts.progress_schedule_seconds,
+         :output_schedule_seconds  => opts.output_schedule_seconds,
+         :progress_schedule_seconds => opts.progress_schedule_seconds,
+         :compression_codec        => opts.compression_codec,
+         :compression_level        => opts.compression_level,
+         :compression_shuffle      => opts.compression_shuffle,
          :enable_checkpoint        => opts.enable_checkpoint,
          :checkpoint_prefix        => opts.checkpoint_prefix,
          :checkpoint_schedule      => opts.checkpoint_schedule,
@@ -821,6 +843,9 @@ function to_hydrodynamic_config(opts::HydrodynamicOptions; kwargs...)::Hydrodyna
         Float64(d[:divergence_limit]), String(d[:output_path]),
         Float64(d[:output_schedule_seconds]),
         Float64(d[:progress_schedule_seconds]),
+        String(d[:compression_codec]),
+        Int(d[:compression_level]),
+        Int(d[:compression_shuffle]),
         Bool(d[:enable_checkpoint]), String(d[:checkpoint_prefix]),
         String(d[:checkpoint_schedule]), String(d[:checkpoint_dir]),
         Bool(d[:checkpoint_cleanup]), Bool(d[:auto_restart]),

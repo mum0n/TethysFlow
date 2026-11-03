@@ -89,6 +89,7 @@ end
         method::Symbol = :auto,
         placement::Symbol = :boundary,
         grid = nothing,
+        projection = nothing,
         ocean_boundary_source::Symbol = :glorys12v1,
         hydrography_source::Symbol = :woa23,
         tides_source::Symbol = :tpxo9,
@@ -124,6 +125,7 @@ function resolve_tidal_forcing(;
     method::Symbol = :auto,
     placement::Symbol = :boundary,
     grid = nothing,
+    projection = nothing,
     ocean_boundary_source::Symbol = :glorys12v1,
     hydrography_source::Symbol = :woa23,
     tides_source::Symbol = :tpxo9,
@@ -180,8 +182,8 @@ function resolve_tidal_forcing(;
     for recipe in order
         push!(tried, recipe)
         outcome = try
-            _build_tidal_forcing(recipe; grid = grid, tides_source = tides_source,
-                                 constituents = constituents,
+            _build_tidal_forcing(recipe; grid = grid, projection = projection,
+                                 tides_source = tides_source, constituents = constituents,
                                  active_edges = active_edges,
                                  time_interval = time_interval, verbose = verbose)
         catch e
@@ -227,12 +229,12 @@ end
 #   relaxation was designed around, and the one whose amplitudes were measured for this
 #   shelf: 0.009-0.159 m/s on the eastern seaboard, 0.006-0.031 on the southern, up to
 #   0.713 m/s in the Bay of Fundy.
-# RISK: never executed. The path `read_tidal_velocity_harmonics` ->
-#   `tidal_forcing_from_harmonics` has no callers anywhere in this package. Treat the first
-#   run as unvalidated physics.
+# The sampled coefficients are rotated into the configured model axes on the host before
+#   the allocation-free evaluator reaches an Oceananigans kernel.
 # ---------------------------------------------------------------------------------------
 function _tidal_forcing_harmonics(;
     grid = nothing,
+    projection = nothing,
     tides_source::Symbol = :tpxo9,
     constituents::Vector{Symbol} = [:M2, :S2],
     active_edges::Union{Nothing, Vector{Symbol}} = nothing,
@@ -245,23 +247,23 @@ function _tidal_forcing_harmonics(;
         println("Tides: no atlas at $(harmony_file); skipping the harmonics recipe.");
         return :unavailable)
 
-    h = read_tidal_velocity_harmonics(harmony_file; constituents = constituents)
-    return tidal_forcing_from_harmonics(h)
+    lon_range, lat_range = grid_geographic_bounds(grid; projection = projection)
+    h = read_tidal_velocity_harmonics(
+        harmony_file; constituents = constituents, lon_range = lon_range, lat_range = lat_range)
+    x_range, y_range = model_coordinate_ranges(grid)
+    coeff = TidalCoefficientGrid(h, x_range, y_range; projection = projection)
+    return tidal_velocity_coefficients(coeff)
 end
 
 # ---------------------------------------------------------------------------------------
 # Recipe 2: coefficient-grid reconstruction.
 #
-# BENEFIT: the most developed route in this package -- `TidalCoefficientGrid` carries
-#   per-boundary amplitudes via `edge_tidal_velocity`, so each open edge is driven at its own
-#   strength rather than one value for the domain. Physically the most defensible for a shelf
-#   with a 0.713 m/s Fundy beside a 0.009 m/s eastern seaboard.
-# RISK: also never executed, and there are two readers (`TidalCoefficientGrid` and
-#   `TidalVelocityHarmonics`) with no statement of which is intended. If this recipe is
-#   preferred, that ambiguity needs settling first -- it is a physics decision, not a code one.
+# This recipe uses the same projection-aware coefficient grid as the harmonics recipe; it is
+# retained as an explicit selector name for callers that want to record the chosen pathway.
 # ---------------------------------------------------------------------------------------
 function _tidal_forcing_coefficients(;
     grid = nothing,
+    projection = nothing,
     tides_source::Symbol = :tpxo9,
     constituents::Vector{Symbol} = [:M2, :S2],
     active_edges::Union{Nothing, Vector{Symbol}} = nothing,
@@ -274,9 +276,12 @@ function _tidal_forcing_coefficients(;
         println("Tides: no atlas at $(harmony_file); skipping the coefficients recipe.");
         return :unavailable)
 
-    harmonics = read_tidal_velocity_harmonics(harmony_file; constituents = constituents)
-    g = TidalCoefficientGrid(harmonics)
-    return tidal_forcing_coefficients(g)
+    lon_range, lat_range = grid_geographic_bounds(grid; projection = projection)
+    harmonics = read_tidal_velocity_harmonics(
+        harmony_file; constituents = constituents, lon_range = lon_range, lat_range = lat_range)
+    x_range, y_range = model_coordinate_ranges(grid)
+    g = TidalCoefficientGrid(harmonics, x_range, y_range; projection = projection)
+    return tidal_velocity_coefficients(g)
 end
 
 # ---------------------------------------------------------------------------------------

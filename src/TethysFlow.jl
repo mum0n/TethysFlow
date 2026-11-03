@@ -45,6 +45,7 @@ include("data/open_data.jl")
 include("utils/architecture.jl")
 include("utils/tides.jl")
 include("geometry/projection.jl")
+include("data/projected_forcing.jl")
 include("data/grid_bathymetry.jl")
 include("data/vertical_grid.jl")
 include("model/hydrodynamic_model.jl")
@@ -72,9 +73,9 @@ export
     ReprojectionGrid,
     is_planar,
     resolve_crs,
-    create_projection,
-    forward_project,
-    inverse_project,
+    build_projection,
+    project_forward,
+    project_inverse,
     grid_convergence_angle,
     geographic_to_rotated,
     rotated_to_geographic,
@@ -116,6 +117,7 @@ export
     HydrodynamicConfig,
     load_configuration,
     configuration_to_options,
+    build_zarr_compressor,
     TethysFlow
 
 end # module

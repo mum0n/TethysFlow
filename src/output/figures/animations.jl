@@ -567,7 +567,7 @@ produces. This function exists for the common case — *show me the field, at on
 time* — and it does two things that case needs and the general one cannot know:
 
 * it accepts a **path to a realized run** — the output directory, or its `hydrodynamics.zarr`
-  store — and reads it through `geoload`, so the grid and the output times come from the
+  store — and reads it through `load_dataset`, so the grid and the output times come from the
   dataset's own records and the caller does not assemble the frame source by hand;
 * `depth = :surface` (the default) resolves to the **shallowest level of that run**, rather
   than to index 1. Index 1 is the deepest level of a written store: its depth axis ascends
@@ -659,7 +659,7 @@ store. Both spellings are accepted — the output directory, or the store itself
 config writes one and the notes and notebooks quote the other.
 
 A store is recognised by opening it, not by the presence of a sidecar: it is a Tethys store,
-so `geoload` either returns a dataset with variables or it does not, and a directory that opens
+so `load_dataset` either returns a dataset with variables or it does not, and a directory that opens
 as nothing is not a store. The old test — `time.json` and `.zattrs` present — went with the
 sidecar those replaced.
 
@@ -673,7 +673,7 @@ function _run_store_dir(path::AbstractString)
     for candidate in (path, joinpath(path, "hydrodynamics.zarr"))
         isdir(candidate) || continue
         ds = try
-            Tethys.geoload(candidate; backend = :zarr)
+            Tethys.load_dataset(candidate; backend = :zarr)
         catch
             nothing
         end
@@ -690,7 +690,7 @@ end
 The frame source `animate_hydrodynamic_field` should be handed for this run and variable.
 
 A run store is read here, into the NamedTuple the figure layer already accepts; anything else
-is returned unchanged. The store is a Tethys store, so this is `geoload` plus the dataset's own
+is returned unchanged. The store is a Tethys store, so this is `load_dataset` plus the dataset's own
 variables and dimension records — the same read the larval half uses, and not a walk over Zarr.
 That matters beyond tidiness: while the writer put each interval in its own directory, Tethys's
 Zarr reader could not open the store at all, so this function had to build the arrays itself, and
@@ -703,7 +703,7 @@ function _animation_source(hydrodynamics, variable::Symbol, frames::Int)
     store = hydrodynamics isa AbstractString ? _run_store_dir(hydrodynamics) : nothing
     isnothing(store) && return hydrodynamics
 
-    ds = Tethys.geoload(store; backend = :zarr)
+    ds = Tethys.load_dataset(store; backend = :zarr)
     lons = collect(Float64, ds.dims[:lon].coords)
     lats = collect(Float64, ds.dims[:lat].coords)
     depths = collect(Float64, ds.dims[:depth].coords)

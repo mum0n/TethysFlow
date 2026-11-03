@@ -2,8 +2,7 @@ using Pkg
 Pkg.activate(@__DIR__)
 
 using TethysFlow
-using Tethys
-using GeoDataSources
+using Tethys 
 using CairoMakie
 using Statistics
 import CairoMakie: record
@@ -19,6 +18,13 @@ import CairoMakie: record
 #    depth    : metres below the surface (50, -50) or "surface" (default: surface)
 #    store    : path to the Tethys store                     (default: the Scotian Shelf store)
 #
+#      variable      : $(join(SUPPORTED_VARIABLES, " | "))   (default: temperature)
+#      depth         : metres below the surface (50, -50), "surface", or "bottom"   (default: surface)
+#      store         : path to the Tethys store   (default: $(DEFAULT_STORE))
+#      days_per_frame: days between animation frames   (default: $TIME_INTERVAL_DAYS)
+
+#      Flags: --bottom, --interval-days=N, --variable=..., --store=..., --depth=...
+#      "flow" draws the horizontal current as arrows over the speed.
 #  The depth is a depth in metres, not a level number. The store's depth axis runs
 #  deepest first -- level 1 is the deepest layer -- so a level number would mean
 #  something different in every store. The surface layer is the one nearest z = 0,
@@ -136,9 +142,9 @@ Extract the bottom-most value of a 3D field, cell by cell, rather than at one
 uniform depth level.
 
 When the store carries bathymetry, the deepest wet level is the first level whose
-depth is at or above the seabed. When bathymetry is absent (as in some Tethys
-stores), the deepest level holding a finite (non-NaN) value is used instead --
-levels below the seabed hold no real water and must not be mistaken for the bottom.
+depth is at or above the seabed. Immersed rock cells below the seabed hold
+0.0 or NaN in hydrodynamic stores and do not represent active water parcels.
+The deepest wet fluid cell holding real water is identified and returned.
 """
 function bottom_matrix(ds, arr3d::AbstractArray{<:Real,3})
     depths = ds.depths
@@ -146,16 +152,31 @@ function bottom_matrix(ds, arr3d::AbstractArray{<:Real,3})
     nx, ny = size(arr3d, 1), size(arr3d, 2)
     nz = size(arr3d, 3)
     out = fill(NaN, nx, ny)
+
+    # Use temperature as the canonical wet-fluid tracer reference when present
+    ref_3d = hasproperty(ds, :temperature) && ds.temperature isa AbstractArray{<:Real,3} &&
+             size(ds.temperature) == (nx, ny, nz) ? ds.temperature : arr3d
+
     for i in 1:nx, j in 1:ny
-        kb = if bathy isa AbstractMatrix && size(bathy, 1) >= i && size(bathy, 2) >= j
+        k_start = 1
+        if bathy isa AbstractMatrix && size(bathy, 1) >= i && size(bathy, 2) >= j
             bval = bathy[i, j]
-            _bottom_level_by_bathy(depths, bval)
-        else
-            # No bathymetry: find the deepest level holding a finite (wet) value.
-            _bottom_level_by_field(arr3d, i, j, nz)
+            if isfinite(bval) && bval < 0.0
+                kb = _bottom_level_by_bathy(depths, bval)
+                if !isnothing(kb)
+                    k_start = kb
+                end
+            end
         end
-        isnothing(kb) && continue
-        out[i, j] = Float64(arr3d[i, j, kb])
+
+        # Scan upward from k_start to find the deepest wet fluid cell
+        for k in k_start:nz
+            v_ref = Float64(ref_3d[i, j, k])
+            if isfinite(v_ref) && v_ref != 0.0
+                out[i, j] = Float64(arr3d[i, j, k])
+                break
+            end
+        end
     end
     return out
 end
@@ -170,22 +191,6 @@ function _bottom_level_by_bathy(depths::AbstractVector{<:Real}, bval::Real)
     for (kk, z) in enumerate(depths)
         if isfinite(z) && z >= bval
             return kk
-        end
-    end
-    return nothing
-end
-
-"""
-    _bottom_level_by_field(arr3d, i, j, nz) -> Union{Int, Nothing}
-
-Deepest level holding a finite value at cell (i, j), scanning deepest first.
-Used when bathymetry is unavailable; levels below the seabed hold no real water.
-"""
-function _bottom_level_by_field(arr3d::AbstractArray{<:Real,3}, i::Int, j::Int, nz::Int)
-    for k in 1:nz
-        v = Float64(arr3d[i, j, k])
-        if isfinite(v)
-            return k
         end
     end
     return nothing
@@ -210,7 +215,7 @@ function _load_coastline(store::AbstractString)
         rings = Tethys.load_coastline_polygons(c)
         isempty(rings) || return rings
     end
-    return GeoDataSources.SCOTIAN_SHELF_COASTLINE
+    return Tethys.SCOTIAN_SHELF_COASTLINE
 end
 
 function main()
@@ -225,6 +230,7 @@ function main()
     variable_override = nothing
     store_override = nothing
     depth_override_text = nothing
+    fps_override = nothing
     i = 1
     while i <= length(ARGS)
         tok = String(ARGS[i])
@@ -261,6 +267,8 @@ function main()
                 store_override = val
             elseif lk in ("interval-days",)
                 time_interval_days = parse(Float64, val)
+            elseif lk in ("fps", "framerate")
+                fps_override = parse(Int, val)
             end
             i += advance
         else
@@ -311,15 +319,16 @@ function main()
     output_path = joinpath(output_dir, "$(variable)_$(depth_tag)_animation.mp4")
 
     field, factor, var_label = VARIABLE_SPEC[variable]
+    fps = !isnothing(fps_override) ? fps_override : FPS
 
     println("="^60)
-    println("TethysFlow — Hydrodynamic Animation Generator")
+    println("TethysFlow: Hydrodynamic Animation Generator")
     println("="^60)
     println("Store:      $store")
     println("Variable:   $variable")
     println("Depth:      ", bottom ? "ocean bottom" : (isnothing(depth) ? "the surface layer" : "$(depth) m"))
     println("Time step:  $time_interval_days day(s) per frame")
-    println("FPS:        $FPS")
+    println("FPS:        $fps")
     println("Output:     $output_path")
     println("="^60)
 
@@ -332,7 +341,7 @@ function main()
     n_times = 0
     times_all = Float64[]
     try
-        probe = Tethys.geoload(store; backend = :zarr)
+        probe = Tethys.load_dataset(store; backend = :zarr)
         if haskey(probe.dims, :time)
             n_times = probe.dims[:time].size
         end
@@ -362,9 +371,11 @@ function main()
                 end
             end
         end
-        if chunk_cap < typemax(Int) && chunk_cap < n_times
-            println("Active store detected: limiting time steps to written chunks ($chunk_cap / $n_times)")
-            n_times = chunk_cap
+        written_count = TethysFlow.store_interval_count(store)
+        effective_cap = written_count > 0 ? written_count : chunk_cap
+        if effective_cap < n_times
+            println("Active store detected: limiting time steps to written intervals ($effective_cap / $n_times)")
+            n_times = effective_cap
             if length(times_all) > n_times
                 times_all = times_all[1:n_times]
             end
@@ -443,21 +454,33 @@ function main()
             end
             return bottom_matrix(ds, Float64.(ds[Symbol(field)])) .* factor
         end
-        if field === :speed || field === :flow
+        raw_val = if field === :speed || field === :flow
             u = Float64.(ds.u[:, :, k]) * factor
             v = Float64.(ds.v[:, :, k]) * factor
-            return sqrt.(u .^ 2 .+ v .^ 2)
+            sqrt.(u .^ 2 .+ v .^ 2)
+        else
+            Float64.(ds[Symbol(field)][:, :, k]) * factor
         end
-        return Float64.(ds[Symbol(field)][:, :, k]) * factor
+        if field === :temperature || field === :salinity
+            for idx in eachindex(raw_val)
+                if raw_val[idx] == 0.0
+                    raw_val[idx] = NaN
+                end
+            end
+        end
+        return raw_val
     end
 
-    # --- Get sample frame data for color range ---
-    # In Oceananigans and hydrodynamic stores, land points outside the wet domain
-    # often hold 0.0 or NaN. Sample the latest frame (or first) for non-zero wet values.
-    sample_var = field_of(get_slice(last(frame_indices)))
-    finite_wet = filter(x -> isfinite(x) && x != 0.0, sample_var)
-    if isempty(finite_wet)
-        finite_wet = filter(isfinite, sample_var)
+    # --- Get sample frame data for color range across seasons ---
+    sampled_indices = unique(round.(Int, range(1, length(frame_indices), length = min(5, length(frame_indices)))))
+    finite_wet = Float64[]
+    for s_idx in sampled_indices
+        s_var = field_of(get_slice(frame_indices[s_idx]))
+        fw = filter(x -> isfinite(x) && x != 0.0, s_var)
+        if isempty(fw)
+            fw = filter(isfinite, s_var)
+        end
+        append!(finite_wet, fw)
     end
     cmin, cmax = if !isempty(finite_wet)
         cmin0, cmax0 = minimum(finite_wet), maximum(finite_wet)
@@ -622,8 +645,8 @@ function main()
         end
 
         depth_desc = bottom ? "ocean bottom" : "$(round(depth_m, digits=1)) m depth"
-        title_lbl.text[] = "$var_label at $depth_desc — " *
-                           "Time: $(round(t_hr, digits=1)) h  (Step $i / $n_times)" *
+        title_lbl.text[] = "$var_label at $depth_desc - " *
+                           "Time: $(round(t_hr / 24.0, digits=1)) d ($(round(t_hr, digits=1)) h, Step $i / $n_times)" *
                            (isempty(arrow_scale_note) ? "" : "\n$arrow_scale_note")
 
         return fig
@@ -633,10 +656,11 @@ function main()
     println("\nRecording animation...")
     t_start = time()
 
-    record(fig, output_path, frame_indices; framerate = FPS) do i
+    record(fig, output_path, 1:total_frames; framerate = fps) do frame_idx
+        i = frame_indices[frame_idx]
         make_frame(i)
-        if i % 10 == 0 || i == total_frames
-            println("  Frame $i / $total_frames  ($(round(time() - t_start, digits=1)) s elapsed)")
+        if frame_idx % 10 == 0 || frame_idx == total_frames
+            println("  Frame $frame_idx / $total_frames  ($(round(time() - t_start, digits=1)) s elapsed)")
         end
     end
 

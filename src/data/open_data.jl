@@ -118,15 +118,26 @@ spaced by `tstep` seconds over a cyclic period of `horizon` seconds:
 ```
 where H is `horizon` and \\Delta t is `tstep`.
 """
-struct TimeSeriesSurfaceStress{N} <: Function
-    values::NTuple{N, Float64}
+struct TimeSeriesSurfaceStress{V <: AbstractVector{<:Real}} <: Function
+    values::V
     horizon::Float64
     tstep::Float64
 end
 
-Adapt.adapt_structure(to, s::TimeSeriesSurfaceStress) = s
+Oceananigans.Architectures.on_architecture(
+    to::Oceananigans.Architectures.AbstractArchitecture,
+    s::TimeSeriesSurfaceStress
+) = TimeSeriesSurfaceStress(
+    Oceananigans.Architectures.on_architecture(to, s.values),
+    s.horizon,
+    s.tstep
+)
 
-@inline function (s::TimeSeriesSurfaceStress{N})(x, y, t) where {N}
+Adapt.adapt_structure(to, s::TimeSeriesSurfaceStress) =
+    TimeSeriesSurfaceStress(Adapt.adapt(to, s.values), s.horizon, s.tstep)
+
+@inline function (s::TimeSeriesSurfaceStress)(x, y, t)
+    N = length(s.values)
     if s.horizon <= 0.0 || N <= 1
         return @inbounds s.values[1]
     end
@@ -136,43 +147,61 @@ Adapt.adapt_structure(to, s::TimeSeriesSurfaceStress) = s
     return @inbounds s.values[k_idx]
 end
 
-@inline (s::TimeSeriesSurfaceStress{N})(x, y, z, t) where {N} = s(x, y, t)
+@inline (s::TimeSeriesSurfaceStress)(x, y, z, t) = s(x, y, t)
 
 """
     read_wind_stress(filepath::AbstractString) -> NamedTuple
 
-Read kinematic surface stress from a wind file via Tethys with robust NetCDF fallback.
+Read kinematic surface stress from a wind file via streaming chunks to prevent memory blowup.
 """
 function read_wind_stress(filepath::AbstractString)
-    try
-        return load_wind_stress_geodata(filepath)
-    catch err
-        # Fallback for NetCDF files where time coordinate is decoded as DateTime
-        return NCDatasets.NCDataset(filepath) do ds
-            tx = Array(ds["tau_x"])
-            ty = Array(ds["tau_y"])
-            tx_clean = filter(!isnan, tx)
-            ty_clean = filter(!isnan, ty)
-            tau_x = isempty(tx_clean) ? 0.0 : Float64(Statistics.mean(tx_clean))
-            tau_y = isempty(ty_clean) ? 0.0 : Float64(Statistics.mean(ty_clean))
-            tau_mag = sqrt.(tx.^2 .+ ty.^2)
-            tau_clean = filter(!isnan, tau_mag)
-            tau_max = isempty(tau_clean) ? 0.0 : Float64(maximum(tau_clean))
-            cd_rho = 1.225 * 1.3e-3
-            speed10_rms = isempty(tau_clean) ? 0.0 : sqrt(Float64(Statistics.mean(tau_clean)) / cd_rho)
-            # Wind stress files carry dynamic stress in Pa (kg m^-1 s^-2). Oceananigans'
-            # FluxBoundaryCondition expects kinematic stress (m^2 s^-2), so divide by
-            # reference water density before returning.
-            rho_water = 1025.0
-            return (
-                tau_x = tau_x / rho_water,
-                tau_y = tau_y / rho_water,
-                tau_max = tau_max / rho_water,
-                speed10_rms = speed10_rms
-            )
+    rho_water = 1025.0
+    cd_rho = 1.225 * 1.3e-3
+    return NCDatasets.NCDataset(filepath) do ds
+        v_tx = ds["tau_x"]
+        v_ty = ds["tau_y"]
+        sz = size(v_tx)
+        nt = ndims(v_tx) >= 3 ? sz[end] : 1
+        sum_x = 0.0
+        sum_y = 0.0
+        sum_mag = 0.0
+        max_mag = 0.0
+        count = 0
+        chunk_size = 500
+        for t_start in 1:chunk_size:nt
+            t_end = min(t_start + chunk_size - 1, nt)
+            slice_x = ndims(v_tx) >= 3 ? v_tx[:, :, t_start:t_end] : Array(v_tx)
+            slice_y = ndims(v_ty) >= 3 ? v_ty[:, :, t_start:t_end] : Array(v_ty)
+            for idx in eachindex(slice_x)
+                x = slice_x[idx]
+                y = slice_y[idx]
+                if !isnan(x) && !isnan(y)
+                    mag = sqrt(x * x + y * y)
+                    sum_x += x
+                    sum_y += y
+                    sum_mag += mag
+                    if mag > max_mag
+                        max_mag = mag
+                    end
+                    count += 1
+                end
+            end
         end
+        tau_x = count > 0 ? (sum_x / count) / rho_water : 0.0
+        tau_y = count > 0 ? (sum_y / count) / rho_water : 0.0
+        tau_max = max_mag / rho_water
+        mean_mag = count > 0 ? (sum_mag / count) : 0.0
+        speed10_rms = sqrt(mean_mag / cd_rho)
+        return (
+            tau_x = tau_x,
+            tau_y = tau_y,
+            tau_max = tau_max,
+            speed10_rms = speed10_rms
+        )
     end
 end
+
+const read_wind_stress_with_fallback = read_wind_stress
 
 """
     TimeSeriesBulkHeatFlux{N}
@@ -188,19 +217,41 @@ Q_{\\text{net}} = Q_{\\text{sw}} - Q_{\\text{lw}} - Q_{\\text{sens}} - Q_{\\text
 All state time series are stored as NTuples of length N, ensuring the struct is strictly `isbits`
 and directly executable on both CPU and GPU architectures.
 """
-struct TimeSeriesBulkHeatFlux{N} <: Function
-    ta::NTuple{N, Float64}
-    ps::NTuple{N, Float64}
-    rh::NTuple{N, Float64}
-    cc::NTuple{N, Float64}
-    sw::NTuple{N, Float64}
-    tau_mag::NTuple{N, Float64}
+struct TimeSeriesBulkHeatFlux{V <: AbstractVector{<:Real}} <: Function
+    ta::V
+    ps::V
+    rh::V
+    cc::V
+    sw::V
+    tau_mag::V
     horizon::Float64
     tstep::Float64
     albedo::Float64
 end
 
-Adapt.adapt_structure(to, s::TimeSeriesBulkHeatFlux) = s
+Oceananigans.Architectures.on_architecture(
+    to::Oceananigans.Architectures.AbstractArchitecture,
+    s::TimeSeriesBulkHeatFlux
+) = TimeSeriesBulkHeatFlux(
+    Oceananigans.Architectures.on_architecture(to, s.ta),
+    Oceananigans.Architectures.on_architecture(to, s.ps),
+    Oceananigans.Architectures.on_architecture(to, s.rh),
+    Oceananigans.Architectures.on_architecture(to, s.cc),
+    Oceananigans.Architectures.on_architecture(to, s.sw),
+    Oceananigans.Architectures.on_architecture(to, s.tau_mag),
+    s.horizon, s.tstep, s.albedo
+)
+
+Adapt.adapt_structure(to, s::TimeSeriesBulkHeatFlux) =
+    TimeSeriesBulkHeatFlux(
+        Adapt.adapt(to, s.ta),
+        Adapt.adapt(to, s.ps),
+        Adapt.adapt(to, s.rh),
+        Adapt.adapt(to, s.cc),
+        Adapt.adapt(to, s.sw),
+        Adapt.adapt(to, s.tau_mag),
+        s.horizon, s.tstep, s.albedo
+    )
 
 @inline function _wind_speed_from_stress_inline(tau::Float64)
     t = abs(tau)
@@ -220,7 +271,8 @@ Adapt.adapt_structure(to, s::TimeSeriesBulkHeatFlux) = s
     return 0.5 * (lo + hi)
 end
 
-@inline function (s::TimeSeriesBulkHeatFlux{N})(x, y, t, T_surf) where {N}
+@inline function (s::TimeSeriesBulkHeatFlux)(x, y, t, T_surf)
+    N = length(s.ta)
     k = if s.horizon <= 0.0 || N <= 1
         1
     else
@@ -283,6 +335,15 @@ struct HaneyRelaxedHeatFlux{F} <: Function
     t_target::Float64
 end
 
+Oceananigans.Architectures.on_architecture(
+    to::Oceananigans.Architectures.AbstractArchitecture,
+    h::HaneyRelaxedHeatFlux
+) = HaneyRelaxedHeatFlux(
+    Oceananigans.Architectures.on_architecture(to, h.base_flux),
+    h.lambda,
+    h.t_target
+)
+
 Adapt.adapt_structure(to, h::HaneyRelaxedHeatFlux) =
     HaneyRelaxedHeatFlux(Adapt.adapt(to, h.base_flux), h.lambda, h.t_target)
 
@@ -305,6 +366,14 @@ struct KinematicSurfaceHeatFlux{F} <: Function
     rho0_cp::Float64
 end
 
+Oceananigans.Architectures.on_architecture(
+    to::Oceananigans.Architectures.AbstractArchitecture,
+    k::KinematicSurfaceHeatFlux
+) = KinematicSurfaceHeatFlux(
+    Oceananigans.Architectures.on_architecture(to, k.flux),
+    k.rho0_cp
+)
+
 Adapt.adapt_structure(to, k::KinematicSurfaceHeatFlux) =
     KinematicSurfaceHeatFlux(Adapt.adapt(to, k.flux), k.rho0_cp)
 
@@ -315,6 +384,42 @@ Adapt.adapt_structure(to, k::KinematicSurfaceHeatFlux) =
     k(x, y, t, T)
 
 """
+    _spatial_mean_series_chunked(var, nt; chunk_size = 1000) -> Vector{Float64}
+
+Compute the area-averaged time series across a 3D dataset `(x, y, t)` by streaming
+along the time dimension in chunks of `chunk_size`. This avoids excessive memory allocations
+and eliminates specialized tuple types over long multi-month or multi-year simulations.
+
+# Inputs
+- `var`: 3D array or dataset variable indexed as `[:, :, start:stop]`.
+- `nt::Int`: Number of discrete time steps.
+- `chunk_size::Int`: Number of time steps loaded per chunk (default: 1000).
+
+# Outputs
+- `Vector{Float64}`: Length-`nt` vector of spatial mean values ignoring NaN entries.
+"""
+function _spatial_mean_series_chunked(var, nt::Int; chunk_size::Int = 1000)
+    means = zeros(Float64, nt)
+    for c_start in 1:chunk_size:nt
+        c_end = min(c_start + chunk_size - 1, nt)
+        sub_arr = var[:, :, c_start:c_end]
+        for (idx, k) in enumerate(c_start:c_end)
+            sl = view(sub_arr, :, :, idx)
+            s = 0.0
+            n = 0
+            for v in sl
+                if isfinite(v) && !isnan(v)
+                    s += Float64(v)
+                    n += 1
+                end
+            end
+            means[k] = n > 0 ? s / n : 0.0
+        end
+    end
+    return means
+end
+
+"""
     build_bulk_surface_flux(wind_file::AbstractString; albedo::Real = 0.06)
 
 Read a surface-wind file and return `(stress_x, stress_y, heat_flux)` callables.
@@ -323,68 +428,29 @@ boundary condition compatibility.
 """
 function build_bulk_surface_flux(wind_file::AbstractString; albedo::Real = 0.06)
     try
-        ds = geoload(wind_file)
+        ds = Tethys.load_dataset(wind_file)
         needed = ("tau_x", "tau_y", "air_temperature", "surface_pressure",
                   "relative_humidity", "cloud_fraction", "sw_down")
         if all(v -> haskey(ds.variables, v), needed) && haskey(ds.coords, :time)
-            tx = Float64.(ds.variables["tau_x"].data)
-            ty = Float64.(ds.variables["tau_y"].data)
-            ta = Float64.(ds.variables["air_temperature"].data)
-            ps = Float64.(ds.variables["surface_pressure"].data)
-            rh = Float64.(ds.variables["relative_humidity"].data)
-            cc = Float64.(ds.variables["cloud_fraction"].data)
-            sw = Float64.(ds.variables["sw_down"].data)
             tvec = first(Tethys.axis(ds, :time))
-
-            nt = size(tx, 3)
+            nt = length(tvec)
             tstep = nt > 1 ? (tvec[end] - tvec[1]) / (nt - 1) : 3600.0
             horizon = nt > 1 ? tvec[end] - tvec[1] : 3600.0
 
             rho_water = 1025.0
-            tx_tuple = ntuple(k -> begin
-                v = filter(!isnan, tx[:, :, k])
-                val = isempty(v) ? 0.0 : Statistics.mean(v) / rho_water
-                isfinite(val) ? val : 0.0
-            end, nt)
-            ty_tuple = ntuple(k -> begin
-                v = filter(!isnan, ty[:, :, k])
-                val = isempty(v) ? 0.0 : Statistics.mean(v) / rho_water
-                isfinite(val) ? val : 0.0
-            end, nt)
-            ta_tuple = ntuple(k -> begin
-                v = filter(!isnan, ta[:, :, k])
-                isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            ps_tuple = ntuple(k -> begin
-                v = filter(!isnan, ps[:, :, k])
-                isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            rh_tuple = ntuple(k -> begin
-                v = filter(!isnan, rh[:, :, k])
-                isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            cc_tuple = ntuple(k -> begin
-                v = filter(!isnan, cc[:, :, k])
-                isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            sw_tuple = ntuple(k -> begin
-                v = filter(!isnan, sw[:, :, k])
-                isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            tau_tuple = ntuple(k -> begin
-                txv = filter(!isnan, tx[:, :, k])
-                tyv = filter(!isnan, ty[:, :, k])
-                if isempty(txv) || isempty(tyv)
-                    0.0
-                else
-                    hypot(Statistics.mean(txv), Statistics.mean(tyv))
-                end
-            end, nt)
+            tx_mean = _spatial_mean_series_chunked(ds.variables["tau_x"].data, nt) ./ rho_water
+            ty_mean = _spatial_mean_series_chunked(ds.variables["tau_y"].data, nt) ./ rho_water
+            ta_mean = _spatial_mean_series_chunked(ds.variables["air_temperature"].data, nt)
+            ps_mean = _spatial_mean_series_chunked(ds.variables["surface_pressure"].data, nt)
+            rh_mean = _spatial_mean_series_chunked(ds.variables["relative_humidity"].data, nt)
+            cc_mean = _spatial_mean_series_chunked(ds.variables["cloud_fraction"].data, nt)
+            sw_mean = _spatial_mean_series_chunked(ds.variables["sw_down"].data, nt)
+            tau_mean = hypot.(tx_mean, ty_mean)
 
-            stress_x = TimeSeriesSurfaceStress{nt}(tx_tuple, horizon, tstep)
-            stress_y = TimeSeriesSurfaceStress{nt}(ty_tuple, horizon, tstep)
-            heat_flux = TimeSeriesBulkHeatFlux{nt}(
-                ta_tuple, ps_tuple, rh_tuple, cc_tuple, sw_tuple, tau_tuple,
+            stress_x = TimeSeriesSurfaceStress(tx_mean, horizon, tstep)
+            stress_y = TimeSeriesSurfaceStress(ty_mean, horizon, tstep)
+            heat_flux = TimeSeriesBulkHeatFlux(
+                ta_mean, ps_mean, rh_mean, cc_mean, sw_mean, tau_mean,
                 horizon, tstep, Float64(albedo)
             )
 
@@ -398,70 +464,31 @@ function build_bulk_surface_flux(wind_file::AbstractString; albedo::Real = 0.06)
         if !haskey(ds, "tau_x") || !haskey(ds, "tau_y")
             return (nothing, nothing, nothing)
         end
-        tx_arr = Array(ds["tau_x"])
-        ty_arr = Array(ds["tau_y"])
-        nt = size(tx_arr, ndims(tx_arr))
+        nt = size(ds["tau_x"], ndims(ds["tau_x"]))
         tstep = 3600.0
         horizon = nt * tstep
 
         rho_water = 1025.0
-        tx_tuple = ntuple(k -> begin
-            sl = selectdim(tx_arr, ndims(tx_arr), k)
-            v = filter(!isnan, vec(sl))
-            val = isempty(v) ? 0.0 : Float64(Statistics.mean(v)) / rho_water
-            isfinite(val) ? val : 0.0
-        end, nt)
-        ty_tuple = ntuple(k -> begin
-            sl = selectdim(ty_arr, ndims(ty_arr), k)
-            v = filter(!isnan, vec(sl))
-            val = isempty(v) ? 0.0 : Float64(Statistics.mean(v)) / rho_water
-            isfinite(val) ? val : 0.0
-        end, nt)
+        tx_mean = _spatial_mean_series_chunked(ds["tau_x"], nt) ./ rho_water
+        ty_mean = _spatial_mean_series_chunked(ds["tau_y"], nt) ./ rho_water
 
-        stress_x = TimeSeriesSurfaceStress{nt}(tx_tuple, horizon, tstep)
-        stress_y = TimeSeriesSurfaceStress{nt}(ty_tuple, horizon, tstep)
+        stress_x = TimeSeriesSurfaceStress(tx_mean, horizon, tstep)
+        stress_y = TimeSeriesSurfaceStress(ty_mean, horizon, tstep)
 
         heat_flux = if haskey(ds, "air_temperature") && haskey(ds, "surface_pressure") &&
                       haskey(ds, "relative_humidity") && haskey(ds, "cloud_fraction") &&
                       haskey(ds, "sw_down")
-            ta_arr = Array(ds["air_temperature"])
-            ps_arr = Array(ds["surface_pressure"])
-            rh_arr = Array(ds["relative_humidity"])
-            cc_arr = Array(ds["cloud_fraction"])
-            sw_arr = Array(ds["sw_down"])
-            ta_tuple = ntuple(k -> begin
-                sl = selectdim(ta_arr, ndims(ta_arr), k)
-                v = filter(!isnan, vec(sl)); isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            ps_tuple = ntuple(k -> begin
-                sl = selectdim(ps_arr, ndims(ps_arr), k)
-                v = filter(!isnan, vec(sl)); isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            rh_tuple = ntuple(k -> begin
-                sl = selectdim(rh_arr, ndims(rh_arr), k)
-                v = filter(!isnan, vec(sl)); isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            cc_tuple = ntuple(k -> begin
-                sl = selectdim(cc_arr, ndims(cc_arr), k)
-                v = filter(!isnan, vec(sl)); isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            sw_tuple = ntuple(k -> begin
-                sl = selectdim(sw_arr, ndims(sw_arr), k)
-                v = filter(!isnan, vec(sl)); isempty(v) ? 0.0 : Float64(Statistics.mean(v))
-            end, nt)
-            tau_tuple = ntuple(k -> begin
-                txsl = selectdim(tx_arr, ndims(tx_arr), k)
-                tysl = selectdim(ty_arr, ndims(ty_arr), k)
-                txv = filter(!isnan, vec(txsl)); tyv = filter(!isnan, vec(tysl))
-                if isempty(txv) || isempty(tyv)
-                    0.0
-                else
-                    hypot(Statistics.mean(txv), Statistics.mean(tyv))
-                end
-            end, nt)
-            TimeSeriesBulkHeatFlux{nt}(
-                ta_tuple, ps_tuple, rh_tuple, cc_tuple, sw_tuple, tau_tuple,
-                horizon, tstep, Float64(albedo))
+            ta_mean = _spatial_mean_series_chunked(ds["air_temperature"], nt)
+            ps_mean = _spatial_mean_series_chunked(ds["surface_pressure"], nt)
+            rh_mean = _spatial_mean_series_chunked(ds["relative_humidity"], nt)
+            cc_mean = _spatial_mean_series_chunked(ds["cloud_fraction"], nt)
+            sw_mean = _spatial_mean_series_chunked(ds["sw_down"], nt)
+            tau_mean = hypot.(tx_mean, ty_mean)
+
+            TimeSeriesBulkHeatFlux(
+                ta_mean, ps_mean, rh_mean, cc_mean, sw_mean, tau_mean,
+                horizon, tstep, Float64(albedo)
+            )
         else
             nothing
         end

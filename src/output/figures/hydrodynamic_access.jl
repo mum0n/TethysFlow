@@ -498,7 +498,7 @@ function resolve_land_mask_coastline(
                 String(coastline_path)
         ]
         for candidate in candidates
-            isfile(candidate) && return load_coastline_polygons(candidate)
+            isfile(candidate) && return Tethys.load_coastline(candidate)
         end
     end
     return Tethys.SCOTIAN_SHELF_COASTLINE
@@ -897,7 +897,7 @@ function extract_hydrodynamic_dataset(
         # re-derive the face averaging the writer now does -- three separate hand-rolled reads
         # of one dataset. The store is a Tethys store, so there is one read and the fields come
         # back already on the grid the dimension records describe.
-        ds = Tethys.geoload(store; backend = :zarr)
+        ds = Tethys.load_dataset(store; backend = :zarr)
         isempty(ds.variables) && error(
             "The store at $(store) opens as a Tethys dataset with no variables. It was " *
             "written by an older writer that placed each interval in its own directory; " *

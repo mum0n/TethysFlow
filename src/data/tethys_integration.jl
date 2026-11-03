@@ -15,15 +15,15 @@ using Oceananigans.ImmersedBoundaries: ImmersedBoundaryGrid
 
 # Export only Oceananigans-dependent functions
 export
-    georegrid_to_model_grid,
+    regrid_to_model_grid,
     build_immersed_grid_from_geodata
 
 """
-    georegrid_to_model_grid(src_ds::GeoDataset, model_grid; vars=String[]) -> GeoDataset
+    regrid_to_model_grid(src_ds::GeoDataset, model_grid; vars=String[]) -> GeoDataset
 
 Regrid a source GeoDataset to match an Oceananigans model grid.
 """
-function georegrid_to_model_grid(src_ds::GeoDataset, model_grid; vars::Vector{String} = String[])
+function regrid_to_model_grid(src_ds::GeoDataset, model_grid; vars::Vector{String} = String[])
     base_g = model_grid isa ImmersedBoundaryGrid ? model_grid.underlying_grid : model_grid
     
     target_lons = collect(Float64, base_g.λᶜᵃᵃ)[base_g.Hx+1 : base_g.Hx+base_g.Nx]
@@ -60,7 +60,7 @@ function georegrid_to_model_grid(src_ds::GeoDataset, model_grid; vars::Vector{St
     target_ds = GeoDataset(Dict{String, GeoArray}(), target_coords, target_dims, 
                           CoordinateSystem(crs="EPSG:4326"), Dict{String, Any}(), nothing, "target_grid")
     
-    return Tethys.georegrid(src_ds, target_ds; vars = vars)
+    return Tethys.regrid_dataset(src_ds, target_ds; vars = vars)
 end
 
 """

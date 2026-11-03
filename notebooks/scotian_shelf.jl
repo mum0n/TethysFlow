@@ -57,7 +57,7 @@ build the immersed grid, assemble the hydrostatic model, run the simulation, and
 
 resulting Tethys store back.
 
-Every input is a named, published product piped in through **Tethys** (`GeoDataSources`), and
+Every input is a named, published product piped in through **Tethys**, and
 
 every output lands in the shared lakehouse. Nothing here is synthetic stand-ins: if a download
 
@@ -111,7 +111,7 @@ julia -e 'using Pluto; Pluto.run()'
 
 The first three cells pin the working directory, activate **this package's environment**, and
 
-load the package, so the `../geodatalakehouse/...` paths in the configs resolve to
+load the package, so the `../lakehouse/...` paths in the configs resolve to
 
 `projects/lakehouse/` rather than to a directory inside the package, and `using TethysFlow`
 
@@ -187,7 +187,7 @@ lakehouse/
 
 ### What assimilation means here
 
-The register (`GeoDataSources`) holds one description per product: where it is published, which
+The register holds one description per product: where it is published, which
 
 file it is, what licence it carries, and which tier it belongs to. `fetch_input(:tides)` checks
 
@@ -421,9 +421,7 @@ projects/
 
 # ╠═╡    └── configs/*.toml        the shipped run definitions
 
-# ╠═╡  Tethys/                  the abstraction layer: geoload / geosave / landmask
-
-# ╠═╡  GeoDataSources/           the fetchers: what gets downloaded, and where it is cached
+# ╠═╡  Tethys/                  the abstraction layer: load_dataset / save_dataset / landmask
 
 # ╠═╡  lakehouse/
 
@@ -863,7 +861,7 @@ store_dir = output_zarr_path(sim_res.output_path)
 
 # The store's time axis is a Zarr array, not a side-car JSON file: the Tethys Zarr backend
 # keeps the coordinate in the group alongside the field variables.
-_times = Float64.(collect(Tethys.geoload(store_dir; backend = :zarr).coords[:time].data))
+_times = Float64.(collect(Tethys.load_dataset(store_dir; backend = :zarr).coords[:time].data))
 
 println("store     : ", store_dir)
 

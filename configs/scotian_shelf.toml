@@ -10,51 +10,55 @@
 # =============================================================================
 
 [domain]
-# Geographic bounding box in degrees (WGS84, EPSG:4326)
-lon_min = -68.0               # Western boundary longitude (°E)
-lon_max = -56.0               # Eastern boundary longitude (°E)
-lat_min = 41.0                # Southern boundary latitude (°N, aligned to shelf slope margin)
-lat_max = 48.0                # Northern boundary latitude (°N)
-z_min = -350.0                # Maximum shelf bathymetric depth (m, epipelagic & mesopelagic zone).
-                               # Ignored when [grid] depths is given: the deepest face is the
-                               # floor of the column, and these depths end at 400 m.
-z_max = 0.0                   # Free surface elevation (m). Ignored when [grid] depths is
-                               # given: the first face is the surface.
-buffer_km = 50.0              # The margin beyond the study area (km). The lateral sponge
-                               # band is this margin: the model relaxes toward the prescribed
-                               # ocean across it, so the band is derived from it (about 0.45).
-
+# Geographic input envelope in degrees (WGS84, EPSG:4326). This encloses the full
+# inverse-projected 1056 x 640 km grid (about 39.4-49.5°N, 69.7-54.2°W) plus a safety margin.
+# The computational grid center remains [domain] lon_center/lat_center below.
+lon_min = -71.0               # Western data-envelope edge (°E; expanded for 640 km cross-shelf extent)
+lon_max = -53.0               # Eastern data-envelope edge (°E; expanded for 640 km cross-shelf extent)
+lat_min = 38.5                # Southern data-envelope edge (°N; envelopes offshore abyssal margin)
+lat_max = 50.0                # Northern data-envelope edge (°N)
+z_min = -400.0                # Maximum modeled depth; [grid] depths defines the actual faces.
+z_max = 0.0                   # Free surface elevation; [grid] depths starts at the surface.
+buffer_km = 50.0              # Width of the lateral relaxation sponge, measured inward from
+                               # active model edges (km; converted to grid-coordinate units).
+ 
 # Map Projection and Orientation
 # Options: "geographic" (default, WGS84 LatitudeLongitudeGrid)
 #          "utm"        (Universal Transverse Mercator via CoordRefSystems.jl, zone = 20)
 #          "lambert"    (Lambert Conformal Conic via CoordRefSystems.jl)
 #          "mercator"   (Mercator projection via CoordRefSystems.jl)
 #          "rotated"    (Conformal local tangent frame rotated along shelf axis)
-projection = "rotated"
-rotation_deg = 55.0           # Grid rotation angle (~55° counter-clockwise from East aligns with shelf margin)
+crs = "lambert"                   # Lambert Conformal Conic (replaces rotated frame)
+rotation_deg = 35.0           # Grid x-axis azimuth, counter-clockwise from East
+lambert_lat1 = 42.0           # LCC standard parallel 1
+lambert_lat2 = 47.0           # LCC standard parallel 2
 lon_center = -62.0            # Center longitude of the rotated frame (°E)
 lat_center = 44.5             # Center latitude of the rotated frame (°N)
 extent_along_shelf_km = 1056.0 # Along-shelf extent (km; Browns Bank to Laurentian Channel / Grand Banks margin)
-extent_cross_shelf_km = 384.0  # Cross-shelf extent (km; coastal margin to slope break, excluding abyssal plain)
+extent_cross_shelf_km = 640.0  # Cross-shelf extent (km; 25% increase from 512 km to push buffer off shelf)
 
 [grid]
 # Rotated along-shelf domain at 2.0 km isotropic horizontal resolution:
 # - dx = 1056.0 km / 528 = 2000.0 m (along-shelf)
-# - dy =  384.0 km / 192 = 2000.0 m (cross-shelf)
-# Both nx=528 and ny=192 are divisible by 16, 24, 48 for parallel decompositions and FFTs.
-# Compared to the unrotated box (480 x 390 = 187,200 cells), total horizontal cells
-# are reduced to 528 x 192 = 101,376 (46% reduction in cell count and runtime).
+# - dy =  640.0 km / 320 = 2000.0 m (cross-shelf)
+# Both nx=528 and ny=320 are divisible by 16, 32, 64 for parallel decompositions and FFTs.
 nx = 528
-ny = 192
+ny = 320
 vertical_stretching_mode = "oceananigans"
 nz_above = 0
 vertical_break_depth = 350.0
 vertical_grid_file = ""
 nz = 23
+# Optimized 23-layer vertical discretization (24 faces, 0 to 400 m):
+# Enhanced resolution in the epipelagic surface mixed layer (3-5 m spacing in top 20 m)
+# to capture diurnal air-sea heat flux and wind-driven Ekman shear, smoothly expanding
+# through the pycnocline and Cold Intermediate Layer (CIL, 30-100 m) to the deep basins
+# and Laurentian Channel (30-40 m). Layer thickness expansion ratios r = Δz_{k+1}/Δz_k
+# remain strictly bounded (1.09 - 1.19), suppressing spurious internal wave reflections.
 depths = [
-    0.0, 10.0, 20.0, 35.0, 50.0, 75.0, 100.0, 125.0, 150.0, 175.0,
-    200.0, 225.0, 250.0, 275.0, 300.0, 350.0, 400.0, 500.0, 600.0,
-    750.0, 900.0, 1050.0, 1250.0, 1500.0
+    0.0, 3.0, 6.5, 10.5, 15.0, 20.0, 25.5, 31.5, 38.5, 46.5,
+    55.5, 66.0, 78.0, 91.5, 107.0, 125.0, 146.0, 171.0, 200.0, 234.0,
+    274.0, 321.0, 360.0, 400.0
 ]
 
 [bathymetry]
@@ -62,6 +66,7 @@ depths = [
 inshore_depth = 10.0              # Water depth at inshore boundary (m, positive downward)
 shelf_slope = 180.0               # Total shelf relief / rise across shelf (m; break - inshore = 180 m)
 mask_bay_of_fundy = true      # Damp excessive non-linear resonance in Bay of Fundy
+smoothing_passes = 10           # Round shelf-break steps before GridFittedBottom
 
 [data]
 # Real-world assimilated data sources
@@ -82,11 +87,16 @@ bulk_heat_flux = true         # Compute dynamic air-sea heat fluxes
 method = "relaxation"         # Lateral boundary relaxation
 obc_type = "flather_chapman"  # Radiation boundary formulation
 ocean_boundary_source = "glorys12v1" # Target tracer and velocity state from GLORYS12V1
-# The sponge band's width is [domain] buffer_km: the band the model relaxes
-# toward the prescribed ocean lives in the margin beyond the study area, so
-# it is the same quantity, and the band in degrees is derived from it.
+# The lateral relaxation band is [domain] buffer_km wide and is measured inward
+# from each active model edge; the data envelope above is separate from this width.
 sponge_timescale_seconds = 3600.0 # Robust 1-hour sponge relaxation timescale
-active_boundaries = ["east","south"] # Upstream along-shelf inflow boundary (Nova Scotia Current)
+active_boundaries = ["east", "south"] # Open edges carrying Nova Scotia Shelf inflow
+# GLORYS input must cover the full rotated model footprint; the old 40-48.5°N
+# cached cutout left its northern and southern corners outside the data domain.
+embedding_lon_min = -71.0
+embedding_lon_max = -53.0
+embedding_lat_min = 38.5
+embedding_lat_max = 50.0
 # The momentum boundary relaxes toward the OBSERVED velocity when the boundary source
 # carries one, and GLORYS12V1 does (uo, vo). `u_inflow`/`v_inflow` are the fallback for
 # a source with no currents -- WOA23 has none -- and are used only when there are none.
@@ -125,10 +135,9 @@ s2_v_amp = 0.0                  # Unused with tpxo9 source
 [hydrodynamics]
 # Numerical solver controls and adaptive stepping
 #
-# The time step is bounded by the barotropic gravity wave, not by advection. With 45
-# split substeps, a 2 km cell and the deepest water in the domain (400 m, so
-# c = sqrt(gH) = 63 m/s), the wave Courant number is c * (dt/45) / dx = 0.167 at
-# dt = 240 s. `max_dt` is held at 240 s to stay under the 0.2 wave target.
+# The time step ceiling of 225.0 s evenly divides both the 900 s progress cadence (4 steps)
+# and the 1800 s field-output cadence (8 steps), preventing periodic step truncation.
+# At dt = 225 s and H = 400 m (c = 62.6 m/s), wave CFL is c*(dt/45)/dx = 0.157 < 0.20.
 #
 # `target_cfl` is NOT the advective Courant number, and treating it as one is why it
 # looks mis-set. The reported "CFL" is max(advective, 0.5 * drag), and the drag term
@@ -143,6 +152,8 @@ s2_v_amp = 0.0                  # Unused with tpxo9 source
 # bottom boundary condition on the sea floor, and it is the drag the step controller
 # protects, so the two are read from this one number.
 cd_drag = 2.5e-3
+horizontal_viscosity = 1000.0    # m^2/s; damp grid-scale near-bottom shear over the shelf break
+horizontal_diffusivity = 200.0   # m^2/s; tracer damping to match
 #
 # Duration is set for a run that completes end to end. The shelf at this resolution
 # resolves mesoscale structure and the spring/neap cycle; a multi-year integration at
@@ -150,12 +161,12 @@ cd_drag = 2.5e-3
 # held in a single session.
 # sim_duration_hours = 168.0      # 7-day integration: two spring/neap cycles
 sim_duration_hours = 13140.0      # 1.5 yr production run
-sim_dt_seconds = 30.0          # Baseline time step in seconds
-min_dt_seconds = 10.0          # Minimum adaptive time step floor (seconds)
-max_dt_seconds = 260.0         # Maximum adaptive time step ceiling (barotropic-CFL safe at 2 km)
+sim_dt_seconds = 30.0          # Baseline initial time step in seconds
+min_dt_seconds = 5.0           # Minimum adaptive time step floor (seconds; provides storm surge headroom)
+max_dt_seconds = 360.0         # Maximum adaptive step; exact harmonic of 900s (4 steps) and 1800s (8 steps)
 adaptive_cfl = true           # Modulate dt according to advective and wave CFL
-target_cfl = 0.2             # Target advective CFL limit (increased from 0.08 for stability)
-target_wave_cfl = 0.2        # Target barotropic gravity wave CFL limit (increased from 0.08 for stability)
+target_cfl = 0.45             # Target advective CFL limit
+target_wave_cfl = 0.35        # Target barotropic gravity wave CFL limit
 surface_heat_flux = 50.0      # Baseline sensible heat flux (W/m^2)
 sst_damping_coefficient = 40.0 # Haney SST relaxation (W m-2 K-1)
 max_current_speed = 2.0       # Current velocity ceiling in m/s (reduced from 3.0 for stability)
@@ -177,7 +188,7 @@ reuse_hydro = false           # Reuse existing flow fields if present
 # There is no separate path setting: a second path for the same store is a second
 # source of truth, and the two disagreeing is a silent data-loss bug.
 output_dir = "../lakehouse/TethysFlow/scotian_shelf" # Target Lakehouse directory
-output_schedule_seconds = 1800.0 # Field snapshot every 30 min: 337 intervals over 7 days, enough for the tidal cycle to animate
+output_schedule_seconds = 3600.0 # Field snapshot every 1 hour (3600 s)
 progress_schedule_seconds = 900.0 # Progress report every 15 min of simulated time (time-based, so the cadence does not drift as Δt ramps)
 max_save_depth = 400.0        # Keep every level (the shelf is 350 m deep) for larval drift
 enable_checkpoint = true      # Enable state checkpointer
@@ -195,7 +206,12 @@ checkpoint_prefix = "scotian_shelf_checkpoint" # Checkpoint prefix
 # most six hours of simulation -- a few minutes of wall clock at this grid.
 checkpoint_schedule_seconds = 432000.0 # Checkpoint every 5 days of simulated time
 checkpoint_cleanup = false    # Keep multiple checkpoints for safe restart
-run_id = ""                   # Unique identifier
+checkpoint_keep = 3           # number of checkpoints to keep (last written)
+
+# Zarr compression options
+compression_codec = "zstd"    # Blosc compression codec: "zstd", "lz4", "zlib", "snappy"
+compression_level = 7         # Compression level (1-9)
+compression_shuffle = 1       # Blosc shuffle mode: 1 = byte shuffle, 2 = bit shuffle, 0 = none
 
 [runtype]
 # Execution environment and reproducibility

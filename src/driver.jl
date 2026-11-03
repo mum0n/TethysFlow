@@ -18,9 +18,9 @@
 #  the call site rather than a `MethodError` later.
 #
 #  NO `using` statements. The module imports Oceananigans, `prettytime`, the
-#  manifest and `GeoDataSources`; a file included into a package relies on the
-#  module scope. `data_source`/`fetch_input` are written `GeoDataSources.`-qualified
-#  because they are not exported from `GeoDataSources`.
+#  manifest and `Tethys`; a file included into a package relies on the
+#  module scope. `data_source`/`fetch_input` are written `Tethys.`-qualified
+#  because they are not exported from `Tethys`.
 # ==============================================================================
 
 """
@@ -118,23 +118,52 @@ function _woa_in_store(opts::HydrodynamicOptions, prefix::AbstractString, month_
 end
 
 """
+    _count_written_intervals(time_data::AbstractVector{<:Real}) -> Int
+
+Count contiguous recorded time intervals in a store's time coordinate axis.
+In a pre-allocated template store, unwritten entries are either `NaN` or 1-based index
+placeholders `Float64(i)`. Returns the index `k` of the last valid written slice, or 0
+if no slices have been written.
+"""
+function _count_written_intervals(time_data::AbstractVector{<:Real})
+    isempty(time_data) && return 0
+    # 1. Check for NaN-based unwritten slots
+    first_nan = findfirst(isnan, time_data)
+    if !isnothing(first_nan)
+        return first_nan - 1
+    end
+    # 2. Check if untouched template [1.0, 2.0, ..., nt]
+    n = length(time_data)
+    if (n == 1 && time_data[1] == 1.0) ||
+       (n > 1 && time_data[1] == 1.0 && time_data[2] == 2.0 && time_data[end] == Float64(n))
+        return 0
+    end
+    # 3. Transition from real times to index placeholders (t[i+1] <= t[i])
+    drop_idx = findfirst(i -> time_data[i + 1] <= time_data[i], 1:(n - 1))
+    if !isnothing(drop_idx)
+        return drop_idx
+    end
+    return n
+end
+
+"""
     _store_sim_info(store_path; stop_time) -> (; exists, is_complete, last_time, n_timesteps)
 
 Resume/reuse state of a run's Tethys store, read from the store's own `time` coordinate. This
-is a `geoload` read of the same axis the writer filled, so the record of progress is the store
+is a `load_dataset` read of the same axis the writer filled, so the record of progress is the store
 itself and cannot drift from what it recorded -- which a `time.json` sidecar could, and did:
 a sidecar written per interval and a coordinate written per interval are two writes of the same
 number.
 
-`last_time` is the newest, `n_timesteps` the count, `is_complete` whether it reached
-`stop_time`. A missing store, or one with no slices, is `exists = false`. This replaced
+`last_time` is the newest, `n_timesteps` the count of valid written slices, `is_complete` whether
+it reached `stop_time`. A missing store, or one with no slices, is `exists = false`. This replaced
 inspecting a JLD2 archive, which the run no longer writes: the store is the deliverable, so it
 is also the record of progress.
 """
 function _store_sim_info(store_path::AbstractString; stop_time::Real)
     stored = if isdir(store_path)
         try
-            ds = Tethys.geoload(store_path; backend = :zarr)
+            ds = Tethys.load_dataset(store_path; backend = :zarr)
             isempty(ds.variables) ? Float64[] :
                 collect(Float64, ds.coords[:time].data)
         catch
@@ -143,12 +172,12 @@ function _store_sim_info(store_path::AbstractString; stop_time::Real)
     else
         Float64[]
     end
-    n = length(stored)
-    last = n > 0 ? maximum(stored) : 0.0
-    return (exists = n > 0,
-            is_complete = n > 0 && last >= stop_time - 1e-3,
+    k = _count_written_intervals(stored)
+    last = k > 0 ? stored[k] : 0.0
+    return (exists = k > 0,
+            is_complete = k > 0 && last >= stop_time - 1e-3,
             last_time = last,
-            n_timesteps = n)
+            n_timesteps = k)
 end
 
 """
@@ -160,8 +189,8 @@ does not exist or has no slices, so a caller resuming a fresh directory starts a
 function store_interval_count(store_path::AbstractString)
     isdir(store_path) || return 0
     try
-        ds = Tethys.geoload(store_path; backend = :zarr)
-        return isempty(ds.variables) ? 0 : length(ds.coords[:time].data)
+        ds = Tethys.load_dataset(store_path; backend = :zarr)
+        return isempty(ds.variables) ? 0 : _count_written_intervals(ds.coords[:time].data)
     catch
         return 0
     end
@@ -173,7 +202,7 @@ end
 Which bathymetry product this run uses.
 
 `opts.bathy_source` is the name the operator wrote in the TOML; the domain is
-`opts.domain_lon`/`opts.domain_lat`. The choice itself is `GeoDataSources`'s: a named
+`opts.domain_lon`/`opts.domain_lat`. The choice itself is `Tethys`'s: a named
 source stands, and an unnamed one is resolved by coverage -- the CHS 15-arc-second
 Northwest Atlantic soundings where the domain lies inside them, the global ETOPO 2022 model
 everywhere else. Every segment asks through here, so they cannot disagree about the sea
@@ -206,7 +235,7 @@ Resolve this run's bathymetry to its source, its durable artefact, and its array
 
 One call site per segment rather than one per use, so the grid, the larval spawn filter, the
 tracking bathymetry function and the figure backgrounds are all one sea floor. Format and
-file location are `GeoDataSources`'s decision; this only states the source, the range, and
+file location are `Tethys`'s decision; this only states the source, the range, and
 where the artefact is kept.
 """
 function _run_bathymetry(; opts::HydrodynamicOptions, force::Bool = false)
@@ -214,9 +243,9 @@ function _run_bathymetry(; opts::HydrodynamicOptions, force::Bool = false)
     output_path = _run_bathymetry_path(opts)
     
     # Fast path: If the bathymetry dataset has already been fetched and cached,
-    # load it directly via Tethys.geoload without invoking GeoDataSources.
+    # load it directly via Tethys.load_dataset without invoking Tethys.
     if !force && (isfile(output_path) || isdir(output_path))
-        ds = Tethys.geoload(output_path)
+        ds = Tethys.load_dataset(output_path)
         elev_var = haskey(ds.variables, "elevation") ? "elevation" :
                    first(Tethys.variables_like(ds, ["elevation", "altitude", "z", "topo"]))
         elev_ga = ds.variables[elev_var]
@@ -266,14 +295,14 @@ function run_segment_data(; opts::HydrodynamicOptions = HydrodynamicOptions())
     # The coastline is a fetched input like any other, and is listed in the provenance
     # registry, so it is acquired rather than seeded from a file in this repository. A stale
     # repository copy would let two runs mask against different land.
-    # `.parquet`, not `.dat`: the data layer's `load_coastline_polygons` reads GeoParquet and
+    # `.parquet`, not `.dat`: the data layer's `load_coastline` reads GeoParquet and
     # rejects any other suffix. The `.dat` name it used to carry was Parquet bytes under a
     # mislabel, which let the fetch succeed and the later read fail.
     coastline_file = joinpath(opts.input_dir, "coastline.parquet")
     if !isfile(coastline_file)
         src = opts.coastline_source
         println("Retrieving coastline ($(src))...")
-        fetch_natural_earth_coastline(
+        Tethys.fetch_natural_earth_coastline(
             lon_range = opts.domain_lon,
             lat_range = opts.domain_lat,
             resolution = replace(src, "natural_earth_" => ""),
@@ -296,18 +325,24 @@ function run_segment_data(; opts::HydrodynamicOptions = HydrodynamicOptions())
     # The source is passed through `preferred_bathymetry_source` rather than to a fetcher
     # directly, so a `bathy_source` that names no single product ("auto", or absent) is
     # resolved by coverage instead of falling back to one by default. Which file that product
-    # is stored in, and in what format, is decided inside `GeoDataSources`; a cached artefact
+    # is stored in, and in what format, is decided inside `Tethys`; a cached artefact
     # is reused rather than re-fetched, which is what keeps this segment and the grid segment
     # on the same sea floor.
     bathy = _run_bathymetry(; opts = opts)
     bathy_file = bathy.output_path
 
     if !isfile(wind_file) && !isdir(wind_file)
-        println("Retrieving surface winds ($(opts.wind_source)) for $(opts.wind_time_iso)...")
-        # One named source, no mirror swap, no synthetic substitute. `fetch_surface_winds`
-        # stops with a message listing the sources this project can actually retrieve.
+        # Time-varying ERA5: fetch a window covering spinup + simulation so the
+        # forcing advances through real weather instead of cycling a single day.
+        # wind_time_iso is the START of that window (i.e. spinup start); production
+        # then begins after spinup_hours have elapsed.
+        total_hours = opts.spinup_hours + opts.sim_duration / 3600.0
+        end_dt = DateTime(opts.wind_time_iso, dateformat"yyyy-mm-ddTHH:MM:SSZ") + Hour(ceil(Int, total_hours))
+        wind_end_iso = Dates.format(end_dt, "yyyy-mm-ddTHH:MM:SS") * "Z"
+        println("Retrieving surface winds ($(opts.wind_source)) for $(opts.wind_time_iso) -> $(wind_end_iso)...")
         wind_res = fetch_surface_winds(opts.wind_source; lon_range = opts.domain_lon,
                                        lat_range = opts.domain_lat, time_iso = opts.wind_time_iso,
+                                       end_time_iso = wind_end_iso,
                                        output_path = wind_file)
         if wind_res isa AbstractString && (isfile(wind_res) || isdir(wind_res))
             wind_file = wind_res
@@ -332,18 +367,64 @@ function run_segment_data(; opts::HydrodynamicOptions = HydrodynamicOptions())
         end
     end
 
-    # The stress is read back out of the file that was actually fetched. Deriving it from
-    # hard-coded reference winds would make the fetch decorative: the numbers driving the
-    # model would not come from the ingested product at all.
-    w = read_wind_stress(wind_file)
+    # Keep the downloaded geographic file as the immutable source. The projection-aware
+    # sidecar is a run-local Lakehouse product and is the one read by the model.
+    projection = build_projection(
+        projection = opts.projection,
+        zone = opts.projection_zone,
+        lat_1 = opts.projection_lat1,
+        lat_2 = opts.projection_lat2,
+        lon_center = opts.lon_center,
+        lat_center = opts.lat_center,
+        rotation_deg = opts.rotation_deg,
+        extent_x = opts.extent_x_km * 1000.0,
+        extent_y = opts.extent_y_km * 1000.0,
+    )
+    projected_wind_file = ensure_projected_vector_dataset(
+        wind_file, projected_wind_path(opts.input_dir), projection;
+        pairs = ((:tau_x, :tau_y, :tau_x, :tau_y),))
+    println("Grid-frame wind stress stored in Lakehouse inputs: $(projected_wind_file)")
+
+    # Preserve the public scalar fallback's geographic east/north convention; model setup
+    # rotates those numbers once. The time-varying model path reads the projected sidecar.
+    w = read_wind_stress_with_fallback(wind_file)
+    w_grid = read_wind_stress_with_fallback(projected_wind_file)
     tau_x, tau_y = w.tau_x, w.tau_y
     bathy_info = (file = bathy_file, exists = true)
     println("Large & Pond (1981) kinematic wind stress, read from $(basename(wind_file)):")
     println("  Domain-mean 10m wind speed: $(round(w.speed10_rms, digits=2)) m/s")
-    println("  Domain-mean stress:   tau_x = $(round(tau_x, digits=8)), " *
-            "tau_y = $(round(tau_y, digits=8)) m^2/s^2")
+    println("  Geographic mean stress: tau_east = $(round(tau_x, digits=8)), " *
+            "tau_north = $(round(tau_y, digits=8)) m^2/s^2")
+    println("  Grid-frame mean stress: tau_x = $(round(w_grid.tau_x, digits=8)), " *
+            "tau_y = $(round(w_grid.tau_y, digits=8)) m^2/s^2")
     println("  Peak stress magnitude: $(round(w.tau_max, digits=8)) m^2/s^2")
-    return (bathy_file = bathy_file, wind_file = wind_file, tau_x = tau_x, tau_y = tau_y, bathy_info = bathy_info)
+
+    # Register the ingested datasets in the shared lakehouse catalog so the
+    # registry reflects what this run actually consumed. Idempotent: a key that
+    # is already registered is left untouched rather than re-published.
+    try
+        _cat = Tethys.GeoDataCatalog(Tethys.default_catalog_path())
+        if !haskey(_cat.key_index, :nwa_bathymetry)
+            Tethys.geopublish!(_cat, bathy_file;
+                key = :nwa_bathymetry, name = "NW Atlantic Bathymetry (NWA)",
+                tier = :raw, producer = "TethysFlow", format = :netcdf,
+                variables = ["elevation"])
+        end
+        if !haskey(_cat.key_index, :era5_wind)
+            Tethys.geopublish!(_cat, wind_file;
+                key = :era5_wind, name = "ERA5 surface wind stress (Open-Meteo)",
+                tier = :raw, producer = "TethysFlow",
+                format = endswith(wind_file, ".zarr") ? :zarr : :netcdf,
+                variables = ["tau_x", "tau_y"])
+        end
+        println("Catalog updated: $(Tethys.default_catalog_path())")
+    catch e
+        @warn "Catalog registration failed" exception = e
+    end
+
+    return (bathy_file = bathy_file, wind_file = wind_file,
+            projected_wind_file = projected_wind_file,
+            tau_x = tau_x, tau_y = tau_y, bathy_info = bathy_info)
 end
 
 
@@ -438,7 +519,7 @@ function run_segment_grid(; opts::HydrodynamicOptions = HydrodynamicOptions())
         nothing
     end
 
-    proj = create_projection(
+    proj = build_projection(
         projection = opts.projection,
         zone = opts.projection_zone,
         lat_1 = opts.projection_lat1,
@@ -473,6 +554,7 @@ function run_segment_grid(; opts::HydrodynamicOptions = HydrodynamicOptions())
         min_water_depth = abs(opts.inshore_depth),
         max_water_depth = 1500.0,
         mask_bay_of_fundy = opts.mask_bay_of_fundy,
+        smoothing_passes = opts.bathy_smoothing_passes,
         projection = proj,
     )
 
@@ -532,7 +614,7 @@ function run_segment_model(;
     proj = if projection !== nothing
         projection
     else
-        create_projection(
+        build_projection(
             projection = opts.projection,
             zone = opts.projection_zone,
             lat_1 = opts.projection_lat1,
@@ -592,11 +674,13 @@ function run_segment_model(;
             cons = opts.tidal_constituents
             println("Reading tidal harmonics from $(basename(tides_file)) " *
                     "(constituents: $(join(cons, ", ")))...")
+            tidal_lon_range, tidal_lat_range = grid_geographic_bounds(
+                target_grid; projection = proj)
             h = read_tidal_velocity_harmonics(
                 tides_file;
                 constituents = cons,
-                lon_range = opts.domain_lon,
-                lat_range = opts.domain_lat,
+                lon_range = tidal_lon_range,
+                lat_range = tidal_lat_range,
             )
             # The forcing is reduced to a small `isbits` coefficient grid BEFORE it reaches the
             # model. A closure that searches the atlas arrays at call time captures heap-allocated
@@ -610,23 +694,33 @@ function run_segment_model(;
             # the domain is ~18 deg across, so 3 deg spacing still resolves the 0.007 m/s southern
             # boundary from the 0.45 m/s Fundy -- the contrast that caused the original blowup.
             #
-            # The spacing is derived from the DOMAIN, not fixed: a 6x4 grid over an 18 deg span
-            # is 3 deg spacing, but the same grid over a 60 deg span would be 10 deg -- too coarse
-            # to resolve a tidal wave. Target ~3 deg spacing, then clamp to the 6x4..12x8 envelope
-            # the GPU parameter memory allows. A run therefore resolves tides the same way
-            # whatever domain it was given.
-            _lon_span = abs(opts.domain_lon[2] - opts.domain_lon[1])
-            _lat_span = abs(opts.domain_lat[2] - opts.domain_lat[1])
-            _tidal_nx = clamp(ceil(Int, _lon_span / 3.0), 6, 12)
-            _tidal_ny = clamp(ceil(Int, _lat_span / 3.0), 4, 8)
+            # Lay out the compact coefficient grid in model coordinates, not geographic
+            # degrees. This keeps the sample spacing meaningful for rotated/projected grids.
+            model_x_range, model_y_range = model_coordinate_ranges(target_grid)
+            _x_span = abs(model_x_range[2] - model_x_range[1])
+            _y_span = abs(model_y_range[2] - model_y_range[1])
+            _spacing_target = is_planar(proj) ? 300_000.0 : 3.0
+            _tidal_nx = clamp(ceil(Int, _x_span / _spacing_target), 6, 12)
+            _tidal_ny = clamp(ceil(Int, _y_span / _spacing_target), 4, 8)
             if (_tidal_nx, _tidal_ny) != (6, 4)
+                _spacing_unit = is_planar(proj) ? "km" : "°"
+                _to_unit = is_planar(proj) ? 1000.0 : 1.0
                 println("  Tidal coefficient grid: $(_tidal_nx)×$(_tidal_ny) " *
-                        "(~$(round(_lon_span / _tidal_nx, digits=1))° × " *
-                        "$(round(_lat_span / _tidal_ny, digits=1))° spacing)")
+                        "(~$(round(_x_span / _tidal_nx / _to_unit, digits=1))$_spacing_unit × " *
+                        "$(round(_y_span / _tidal_ny / _to_unit, digits=1))$_spacing_unit spacing)")
             end
-            coeff = TidalCoefficientGrid(h, (opts.domain_lon[1], opts.domain_lon[2]),
-                                         (opts.domain_lat[1], opts.domain_lat[2]);
-                                         nx = _tidal_nx, ny = _tidal_ny)
+            coeff = TidalCoefficientGrid(h, model_x_range, model_y_range;
+                                         projection = proj, nx = _tidal_nx, ny = _tidal_ny)
+            # Persist the projection-specific, grid-axis harmonic coefficients beside the
+            # other processed forcing inputs, then load that exact artifact for the model.
+            mkpath(opts.input_dir)
+            coeff_path = joinpath(opts.input_dir, "tidal_coefficients_grid.jld2")
+            JLD2.jldopen(coeff_path, "w") do file
+                file["projection_signature"] = projection_signature(proj)
+                file["constituents"] = join(string.(cons), ",")
+                file["coefficient_grid"] = coeff
+            end
+            coeff = JLD2.load(coeff_path, "coefficient_grid")
             f = tidal_velocity_coefficients(coeff)
             edge = boundary_tidal_forcing(h; edges = (:east, :south, :west), sample_stride = 4)
             amps = vcat(edge[:east].uamp[1, :], edge[:south].uamp[1, :], edge[:west].uamp[1, :])
@@ -656,11 +750,22 @@ It has to be larger: the model needs the water just *outside* its own edges, and
 to the study domain would put the interpolation's edge exactly on the sponge.
 """
 function fetch_boundary_tracers(source::Symbol, opts)
-    return fetch_boundary_hydrography(source;
+    return Tethys.fetch_boundary_hydrography(source;
         lon_range = opts.embedding_lon, lat_range = opts.embedding_lat,
         input_dir = opts.input_dir,
         month = opts.hydrography_month,
         with_velocities = true)
+end
+
+function boundary_velocity_source_path(opts::HydrodynamicOptions)
+    lon, lat = opts.embedding_lon, opts.embedding_lat
+    stem = "boundary_glorys_1993_$(lon[1])_$(lon[2])_$(lat[1])_$(lat[2])_uv"
+    zarr = joinpath(opts.input_dir, stem * ".zarr")
+    netcdf = joinpath(opts.input_dir, stem * ".nc")
+    isdir(zarr) && return zarr
+    isfile(netcdf) && return netcdf
+    error("GLORYS boundary velocities were returned but their source file was not found " *
+          "in $(opts.input_dir); expected $(basename(zarr)) or $(basename(netcdf)).")
 end
 
     # Configure open boundary conditions (lateral sponge) if requested.
@@ -691,7 +796,16 @@ end
         # and not only a water type. `u_inflow`/`v_inflow` remain the fallback for
         # sources that carry no currents.
         if haskey(boundary_data, :u) && haskey(boundary_data, :v)
-            boundary_velocity_data = (u = boundary_data.u, v = boundary_data.v)
+            raw_velocity_file = boundary_velocity_source_path(opts)
+            projected_velocity_file = ensure_projected_vector_dataset(
+                raw_velocity_file, projected_boundary_velocity_path(opts.input_dir), proj;
+                pairs = ((:uo, :vo, :uo, :vo),))
+            m = opts.hydrography_month == 0 ? collect(1:12) :
+                [clamp(opts.hydrography_month, 1, 12)]
+            println("Grid-frame GLORYS velocities stored in Lakehouse inputs: " *
+                    "$(projected_velocity_file)")
+            boundary_velocity_data = Tethys.build_boundary_velocity_interpolators(
+                projected_velocity_file; u_name = "uo", v_name = "vo", months = m)
         end
         println("Boundary hydrography: observed temperature and salinity from $(obc_src).")
         if isnothing(boundary_velocity_data)
@@ -729,7 +843,16 @@ end
     # `wind_file` is a parameter of this function now, not a free variable left over from the
     # segment-1 scope. It was referenced here but never in scope, so `--all` died with
     # "UndefVarError: wind_file not defined in Main" before ever reaching the flux.
-    wind_path = isempty(wind_file) ? joinpath(opts.input_dir, "wind_active.nc") : wind_file
+    raw_wind_path = if isempty(wind_file)
+        nc = joinpath(opts.input_dir, "wind_active.nc")
+        zr = joinpath(opts.input_dir, "wind_active.zarr")
+        isfile(nc) ? nc : (isdir(zr) ? zr : nc)
+    else
+        String(wind_file)
+    end
+    wind_path = ensure_projected_vector_dataset(
+        raw_wind_path, projected_wind_path(opts.input_dir), proj;
+        pairs = ((:tau_x, :tau_y, :tau_x, :tau_y),))
     atmo_craft = if opts.atmospheric_source in (:era5, :era5_climatology, :mhw)
         if !isfile(wind_path)
             error(
@@ -806,14 +929,9 @@ end
         atmo_craft.heat_flux
     end
 
-    # ── Geographic forcing: stress and inflow are already in (east, north) ─────────
-    # The grid is a geographic `LatitudeLongitudeGrid`: its x axis is east and its y axis
-    # is north. The wind stress and the prescribed inflow are geographic quantities, so
-    # they are handed to the model unchanged.
-    #
-    # We must NOT wrap callables in closures: closures are not Adapt-safe for GPU.
-    # The `TimeSeriesSurfaceStress` values tuple is left in place, so the object stays a
-    # bitstype that Adapt can copy to device.
+    # Wind stress has already been rotated at every source-grid point and read from the
+    # run-local projected-forcing sidecar. Keep its time-series representation intact for
+    # GPU adaptation. The fallback inflow remains geographic and is rotated by the model.
     if wind_x isa TimeSeriesSurfaceStress && wind_y isa TimeSeriesSurfaceStress
         wind_x_rot = wind_x
         wind_y_rot = wind_y
@@ -873,11 +991,13 @@ end
     # and the split-explicit free-surface solver.
     println("Assembling model via Oceananigans.HydrostaticFreeSurfaceModel " *
             "(spherical Coriolis, TEOS-10 EOS, split-explicit free surface)...")
+    wind_stress_frame = isnothing(atmo_craft) ? :geographic : :model_grid
     model = build_hydrodynamic_model(
         target_grid,
         Δt = opts.sim_dt,
         surface_wind_stress_x = wind_x_rot,
         surface_wind_stress_y = wind_y_rot,
+        surface_wind_stress_frame = wind_stress_frame,
         surface_heat_flux = surface_heat_flux_val,
         tidal_forcing = tidal_forcing,
         open_boundary_conditions = obc_craft,
@@ -901,6 +1021,8 @@ end
         closure = closure_choice in (:nemotke, :catke) ? :catke : nothing,
         ν = 1e-2,
         κ = 1e-2,
+        horizontal_viscosity = opts.horizontal_viscosity,
+        horizontal_diffusivity = opts.horizontal_diffusivity,
         tracers = (:T, :S),
         free_surface = free_surf,
         momentum_advection = WENO(),
@@ -937,7 +1059,7 @@ end
 
         if isempty(t_file) || isempty(s_file)
             println("Fetching WOA23 climatology via Tethys...")
-            woa_res = fetch_open_woa_climatology(
+            woa_res = Tethys.fetch_woa23(
                 lon_range = opts.domain_lon,
                 lat_range = opts.domain_lat,
                 month = opts.hydrography_month,
@@ -1007,7 +1129,7 @@ end
             try
                 if !isfile(copernicus_file)
                     println("Fetching Copernicus Marine hydrography (trying GLOPHY-2 → GLO12 → GLORYS12 → NRT)...")
-                    fetch_copernicus_hydrography_with_fallback(
+                    Tethys.fetch_copernicus_hydrography_with_fallback(
                         lon_range = opts.domain_lon,
                         lat_range = opts.domain_lat,
                         start_date = "$(start_yr)-01-01",
@@ -1081,12 +1203,13 @@ and execute the regional hydrodynamic integration.
 - `model`: Configured `HydrostaticFreeSurfaceModel`.
 
 # Outputs
-- `NamedTuple`: `(simulation, output_path, checkpoint_path)` — `output_path` is the Tethys
+- `NamedTuple`: `(simulation, output_path, checkpoint_path)`  -  `output_path` is the Tethys
   output store, `checkpoint_path` the JLD2 restart checkpoint.
 """
 function run_segment_simulation(;
     opts::HydrodynamicOptions = HydrodynamicOptions(),
-    model = nothing
+    model = nothing,
+    projection = nothing
 )
     default_jld2 = "hydrodynamics.jld2"
     jld2_path, _ = resolve_hydro_model_path(opts, default_jld2)
@@ -1272,28 +1395,82 @@ function run_segment_simulation(;
     # incompatible), do not silently restart from t = 0: recover the model clock and any
     # tracer fields that the output store still holds, so the run continues from its last
     # saved state instead of discarding 11 days of progress.
+    recovered_from_store = false
     if resume
         cp_candidate = find_latest_checkpoint(cp_dir_target; prefix = opts.checkpoint_prefix)
+        g = target_model.grid
+        base_g = hasproperty(g, :underlying_grid) ? g.underlying_grid : g
+        m_halos = (base_g.Hx, base_g.Hy, base_g.Hz)
         cp_ok = !isnothing(cp_candidate) && verify_checkpoint_compatibility(
-            cp_candidate, size(target_model.velocities.u.data))
-        if !cp_ok && ispath(store_path)
+            cp_candidate, size(target_model.velocities.u.data);
+            divergence_velocity_limit = opts.divergence_velocity_limit,
+            halos = m_halos)
+
+        # Check whether the latest checkpoint is behind the output store
+        cp_iter = 0
+        cp_time = 0.0
+        if cp_ok
+            m_cp = match(r"_iteration(\d+)\.jld2$", basename(cp_candidate))
+            if !isnothing(m_cp)
+                cp_iter = something(tryparse(Int, m_cp.captures[1]), 0)
+            end
+            if cp_iter > 0
+                cp_info = inspect_hydrodynamic_checkpoint(cp_candidate)
+                cp_time = cp_info.time
+            end
+        end
+
+        k_slices = ispath(store_path) ? store_interval_count(store_path) : 0
+        store_time = 0.0
+        if k_slices > 0
             try
-                ds = Tethys.geoload(store_path; backend = :zarr)
-                t_last = Float64(last(ds.coords[:time].data))
-                if haskey(ds.variables, "T")
-                    Oceananigans.set!(target_model; T = ds.variables["T"].data[:, :, :, end])
-                end
-                if haskey(ds.variables, "S") && hasproperty(target_model.tracers, :S)
-                    Oceananigans.set!(target_model; S = ds.variables["S"].data[:, :, :, end])
+                ds_check = Tethys.load_dataset(store_path; backend = :zarr)
+                store_time = Float64(ds_check.coords[:time].data[k_slices])
+            catch
+                k_slices = 0
+            end
+        end
+
+        # If no valid Oceananigans checkpoint is available, recover prognostic state
+        # directly from the output store as an emergency fallback. When a valid JLD2
+        # checkpoint exists, it is always preferred because it preserves native C-grid
+        # face staggering, vertical velocity w, free surface elevation η, and timestepper
+        # tendencies, avoiding the numerical shock of re-initializing from cell centres.
+        if k_slices > 0 && !cp_ok
+            try
+                ds = Tethys.load_dataset(store_path; backend = :zarr)
+                t_last = Float64(ds.coords[:time].data[k_slices])
+                g = target_model.grid
+                base_g = hasproperty(g, :underlying_grid) ? g.underlying_grid : g
+                grid_sz = (base_g.Nx, base_g.Ny, base_g.Nz)
+                t_sz = size(ds.variables["T"].data)
+                if t_sz[1:3] == grid_sz
+                    if haskey(ds.variables, "T")
+                        Oceananigans.set!(target_model; T = ds.variables["T"].data[:, :, :, k_slices])
+                    end
+                    if haskey(ds.variables, "S") && hasproperty(target_model.tracers, :S)
+                        Oceananigans.set!(target_model; S = ds.variables["S"].data[:, :, :, k_slices])
+                    end
+                    if haskey(ds.variables, "u")
+                        Oceananigans.set!(target_model; u = ds.variables["u"].data[:, :, :, k_slices])
+                    end
+                    if haskey(ds.variables, "v")
+                        Oceananigans.set!(target_model; v = ds.variables["v"].data[:, :, :, k_slices])
+                    end
                 end
                 target_model.clock.time = t_last
-                println("Recovered model state from the output store (t = $(round(t_last, digits=2)) s); " *
-                        "the checkpoint was unusable.")
+                target_model.clock.iteration = max(1, round(Int, t_last / max(opts.sim_dt, 1.0)))
+                recovered_from_store = true
+                println("Recovered model state from the output store (t = $(round(t_last, digits=2)) s, " *
+                        "slice $(k_slices)); checkpoint $(something(cp_candidate, "none")) " *
+                        "(t = $(round(cp_time, digits=2)) s) was behind or unusable.")
             catch err
                 @warn "Could not recover model state from the output store: $(err)"
             end
         end
     end
+
+    pickup_target = (resume && !recovered_from_store) ? :auto : false
 
     sim = setup_hydrodynamic_simulation(
         target_model,
@@ -1315,24 +1492,59 @@ function run_segment_simulation(;
         checkpoint_prefix = opts.checkpoint_prefix,
         checkpoint_schedule = opts.checkpoint_schedule > 0 ? opts.checkpoint_schedule : nothing,
         cleanup_checkpoints = opts.checkpoint_cleanup,
-        pickup = resume ? :auto : false,
+        checkpoint_keep = opts.checkpoint_keep,
+        pickup = pickup_target,
         divergence_velocity_limit = opts.divergence_velocity_limit
     )
 
+    if recovered_from_store && opts.enable_checkpoint && haskey(sim.output_writers, :checkpointer)
+        try
+            Oceananigans.write_output!(sim.output_writers[:checkpointer], sim)
+            println("Saved baseline restart checkpoint at recovered iteration $(target_model.clock.iteration).")
+        catch cp_err
+            @warn "Could not save baseline checkpoint after store recovery: $(cp_err)"
+        end
+    end
+
+    proj = if projection !== nothing
+        projection
+    else
+        build_projection(
+            projection = opts.projection,
+            zone = opts.projection_zone,
+            lat_1 = opts.projection_lat1,
+            lat_2 = opts.projection_lat2,
+            lon_center = opts.lon_center,
+            lat_center = opts.lat_center,
+            rotation_deg = opts.rotation_deg,
+            extent_x = opts.extent_x_km * 1000.0,
+            extent_y = opts.extent_y_km * 1000.0,
+        )
+    end
+
     out_interval = Oceananigans.TimeInterval(
         (opts.output_schedule_seconds > 0.0) ? opts.output_schedule_seconds : 21600.0)
+    comp = build_zarr_compressor(
+        codec = opts.compression_codec,
+        level = opts.compression_level,
+        shuffle = opts.compression_shuffle
+    )
     output_store = attach_output_callback!(sim, out_dir_target;
                                            fields = ("u", "v", "w", "T", "S"),
                                            schedule = out_interval, resume = resume,
                                            spinup_seconds = spinup_sec,
-                                           max_save_depth = opts.max_save_depth)
+                                           max_save_depth = opts.max_save_depth,
+                                           compressor = comp,
+                                           projection = proj,
+                                           domain_lon = opts.domain_lon,
+                                           domain_lat = opts.domain_lat)
     @assert output_store == store_path "output store drifted from the resume/reuse target"
     println("Ocean output is a Tethys store: $(output_store)")
 
     println("Integrating hydrostatic primitive equations...")
     run_hydrodynamic_simulation!(
         sim,
-        pickup = resume ? :auto : false,
+        pickup = pickup_target,
         verbose = true
     )
 
@@ -1370,7 +1582,7 @@ second, different coast.
 - `opts::HydrodynamicOptions`: The resolved configuration.
 
 # Outputs
-- `NamedTuple`: `(figures, output_dir)` — the paths written, and where they went.
+- `NamedTuple`: `(figures, output_dir)`  -  the paths written, and where they went.
 """
 function run_segment_viz(; opts::HydrodynamicOptions = HydrodynamicOptions())
     println("\n=================================================================")
@@ -1394,7 +1606,7 @@ function run_segment_viz(; opts::HydrodynamicOptions = HydrodynamicOptions())
         nothing
     end
     coastline_rings = let path = joinpath(opts.input_dir, "coastline.parquet")
-        isfile(path) ? load_coastline_polygons(path) : nothing
+        isfile(path) ? load_coastline(path) : nothing
     end
     if isnothing(coastline_rings)
         @warn "No coastline beside the run; the figures fall back to the region's rings."
@@ -1484,11 +1696,12 @@ function render_hydrodynamic_animation_if_requested(
     # model it shows describe one sea floor.
     bathy_data = _run_bathymetry(; opts = opts)
     # The run's own coastline, fetched in Segment 1 and kept in the run's input directory.
+    # model ran on.
     # Read here rather than defaulting to the bundled regional rings: a figure that masks
     # against a different land than the model ran on silently draws land in the water.
     # Absent file means no rings, and the caller falls back to the region's rings.
     coastline_rings = let path = joinpath(opts.input_dir, "coastline.parquet")
-        isfile(path) ? load_coastline_polygons(path) : nothing
+        isfile(path) ? Tethys.load_coastline(path) : nothing
     end
     anim_fmt = lowercase(opts.anim_format) == "gif" ? "gif" : "mp4"
     anim_file_path = if !isempty(strip(opts.anim_output_path))
@@ -1580,12 +1793,17 @@ function run_production_pipeline(; opts::HydrodynamicOptions = HydrodynamicOptio
             immersed_grid = grid_res.immersed_grid,
             projection = grid_res.projection,
             tau_x = data_res.tau_x,
-            tau_y = data_res.tau_y
+            tau_y = data_res.tau_y,
+            wind_file = data_res.projected_wind_file
         )
 
 
         # Step 5: Hydrodynamic Simulation
-        sim_res = run_segment_simulation(opts = opts, model = model_res.model)
+        sim_res = run_segment_simulation(
+            opts = opts,
+            model = model_res.model,
+            projection = grid_res.projection
+        )
     else
         println("[Pipeline Notice] --track-only active: Skipping hydrodynamic simulation (Segments 3-5).")
     end

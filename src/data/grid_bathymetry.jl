@@ -117,7 +117,7 @@ function build_shelf_grid(;
     proj_obj = if projection isa AbstractProjection
         projection
     else
-        create_projection(
+        build_projection(
             projection = string(projection),
             zone = Int(projection_zone),
             lat_1 = projection_lat1 == 0.0 ? nothing : Float64(projection_lat1),
@@ -146,20 +146,20 @@ function build_shelf_grid(;
     lx = if eff_lx !== nothing && eff_lx > 0.0
         eff_lx
     else
-        c1 = forward_project(proj_obj, lon_range[1], lat_range[1])
-        c2 = forward_project(proj_obj, lon_range[2], lat_range[1])
-        c3 = forward_project(proj_obj, lon_range[2], lat_range[2])
-        c4 = forward_project(proj_obj, lon_range[1], lat_range[2])
+        c1 = project_forward(proj_obj, lon_range[1], lat_range[1])
+        c2 = project_forward(proj_obj, lon_range[2], lat_range[1])
+        c3 = project_forward(proj_obj, lon_range[2], lat_range[2])
+        c4 = project_forward(proj_obj, lon_range[1], lat_range[2])
         maximum((c1[1], c2[1], c3[1], c4[1])) - minimum((c1[1], c2[1], c3[1], c4[1]))
     end
 
     ly = if eff_ly !== nothing && eff_ly > 0.0
         eff_ly
     else
-        c1 = forward_project(proj_obj, lon_range[1], lat_range[1])
-        c2 = forward_project(proj_obj, lon_range[2], lat_range[1])
-        c3 = forward_project(proj_obj, lon_range[2], lat_range[2])
-        c4 = forward_project(proj_obj, lon_range[1], lat_range[2])
+        c1 = project_forward(proj_obj, lon_range[1], lat_range[1])
+        c2 = project_forward(proj_obj, lon_range[2], lat_range[1])
+        c3 = project_forward(proj_obj, lon_range[2], lat_range[2])
+        c4 = project_forward(proj_obj, lon_range[1], lat_range[2])
         maximum((c1[2], c2[2], c3[2], c4[2])) - minimum((c1[2], c2[2], c3[2], c4[2]))
     end
 
@@ -183,6 +183,7 @@ degrees East and North enclosing `grid`'s interior domain.
 """
 function grid_geographic_bounds(grid; projection = nothing)
     base_g = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
+    base_g = architecture(base_g) isa GPU ? on_architecture(CPU(), base_g) : base_g
     if base_g isa LatitudeLongitudeGrid
         lon_range = (Float64(base_g.λᶠᵃᵃ[1]), Float64(base_g.λᶠᵃᵃ[base_g.Nx + 1]))
         lat_range = (Float64(base_g.φᵃᶠᵃ[1]), Float64(base_g.φᵃᶠᵃ[base_g.Ny + 1]))
@@ -191,10 +192,10 @@ function grid_geographic_bounds(grid; projection = nothing)
     if projection !== nothing
         x_min, x_max = Float64(base_g.xᶠᵃᵃ[1]), Float64(base_g.xᶠᵃᵃ[base_g.Nx + 1])
         y_min, y_max = Float64(base_g.yᵃᶠᵃ[1]), Float64(base_g.yᵃᶠᵃ[base_g.Ny + 1])
-        c1 = inverse_project(projection, x_min, y_min)
-        c2 = inverse_project(projection, x_max, y_min)
-        c3 = inverse_project(projection, x_max, y_max)
-        c4 = inverse_project(projection, x_min, y_max)
+        c1 = project_inverse(projection, x_min, y_min)
+        c2 = project_inverse(projection, x_max, y_min)
+        c3 = project_inverse(projection, x_max, y_max)
+        c4 = project_inverse(projection, x_min, y_max)
         lons = (c1[1], c2[1], c3[1], c4[1])
         lats = (c1[2], c2[2], c3[2], c4[2])
         return (minimum(lons) - 0.2, maximum(lons) + 0.2), (minimum(lats) - 0.2, maximum(lats) + 0.2)
@@ -257,10 +258,10 @@ Wrap a base `LatitudeLongitudeGrid` with an `ImmersedBoundaryGrid` using
 `GridFittedBottom` representing ocean seafloor topography.
 
 `bathymetry` is either the `(Nx, Ny)` topography matrix itself, or a `GeoDataset` it is
-read from through `GeoDataSources.bathymetry_arrays`, which selects the elevation variable
+read from through `Tethys.bathymetry_arrays`, which selects the elevation variable
 and resolves the `(lon, lat)` orientation from the dimensions the dataset declared. A file
 path is deliberately not accepted: which file a source resolves to, and in what format, is
-decided inside `GeoDataSources`, and a caller that passes a path is making that decision
+decided inside `Tethys`, and a caller that passes a path is making that decision
 itself.
 """
 function build_immersed_grid(
@@ -350,7 +351,7 @@ function _grid_interior_centres(grid; projection = nothing)
         lon_mat = Matrix{Float64}(undef, nx, ny)
         lat_mat = Matrix{Float64}(undef, nx, ny)
         for j in 1:ny, i in 1:nx
-            lon_mat[i, j], lat_mat[i, j] = inverse_project(projection, xs[i], ys[j])
+            lon_mat[i, j], lat_mat[i, j] = project_inverse(projection, xs[i], ys[j])
         end
         return (lon_mat, lat_mat)
     end
@@ -381,7 +382,8 @@ function _fit_bathymetry_to_grid(
     projection = nothing,
     min_water_depth::Real = 10.0,
     max_water_depth::Real = 0.0,
-    mask_bay_of_fundy::Bool = false
+    mask_bay_of_fundy::Bool = false,
+    smoothing_passes::Integer = 4
 )
     nx, ny, _ = size(grid)
     target_lons, target_lats = _grid_interior_centres(grid; projection = projection)
@@ -436,7 +438,7 @@ function _fit_bathymetry_to_grid(
     h_ceiling = Float64(max_water_depth)
     conditioned_topo = smooth_bathymetry(
         regridded_topo,
-        passes = 4,
+        passes = Int(smoothing_passes),
         alpha = 0.5,
         h_min = h_floor,
         h_max = h_ceiling
@@ -484,13 +486,14 @@ function build_immersed_grid_from_real_data(
     min_water_depth::Real = 10.0,
     max_water_depth::Real = 0.0,
     mask_bay_of_fundy::Bool = false,
+    smoothing_passes::Integer = 4,
     kwargs...
 )
     base_g = grid isa ImmersedBoundaryGrid ? grid.underlying_grid : grid
     lon_range, lat_range = grid_geographic_bounds(base_g; projection = projection)
 
     bathy_elevation, bathy_lon, bathy_lat = if !force && !isnothing(output_path) && (isfile(output_path) || isdir(output_path))
-        ds = Tethys.geoload(output_path)
+        ds = Tethys.load_dataset(output_path)
         elev_var = haskey(ds.variables, varname) ? varname :
                    first(Tethys.variables_like(ds, ["elevation", "altitude", "z", "topo"]))
         elev_ga = ds.variables[elev_var]
@@ -519,7 +522,8 @@ function build_immersed_grid_from_real_data(
         projection = projection,
         min_water_depth = min_water_depth,
         max_water_depth = max_water_depth,
-        mask_bay_of_fundy = mask_bay_of_fundy
+        mask_bay_of_fundy = mask_bay_of_fundy,
+        smoothing_passes = smoothing_passes
     )
 
     return build_immersed_grid(grid, conditioned_topo)
@@ -598,37 +602,3 @@ function get_strata_buffered_envelope(
         dlat = dlat
     )
 end
-
-"""
-    point_in_polygon(x::Real, y::Real, poly_lons::AbstractVector, poly_lats::AbstractVector) -> Bool
-
-Determine whether point (x, y) is inside polygon (poly_lons, poly_lats).
-
-A re-export of `Tethys.point_in_polygon`, kept because the geometry is a pure data-layer
-concern and a caller that has rings should not have to import this package to test them.
-"""
-const point_in_polygon = Tethys.point_in_polygon
-
-"""
-    is_point_on_land(lon::Real, lat::Real; coastline = nothing) -> Bool
-
-Determine whether geographic point (lon, lat) falls on land.
-
-A re-export of `Tethys.is_point_on_land`, which resolves the coastline file when the caller
-does not name one. The default location is that function's to decide, not this package's.
-
-There is no bundled regional fallback here. This package is an application layer for one
-region, and the rings for that region live in `Tethys.SCOTIAN_SHELF_COASTLINE`; a
-caller that wants a regional default passes them, which is a decision it can see.
-"""
-const is_point_on_land = Tethys.is_point_on_land
-
-"""
-    load_coastline_polygons(; coastline_path = nothing) -> Vector{NamedTuple}
-
-Load coastline rings from `coastline_path`, or from the default location when none is named.
-
-A re-export of `Tethys.load_coastline_polygons`.
-"""
-const load_coastline_polygons = Tethys.load_coastline_polygons
-
